@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# New files and folders
+/meltingpot/meltingpot/assets/
+/meltingpot/assets/
