@@ -33,7 +33,7 @@ Model-free conventions in multi-agent reinforcement learning with heterogeneous
 preferences. arXiv preprint arXiv:2010.09054.
 """
 
-from typing import Any, Dict, Mapping, Sequence
+from typing import Any, Dict, Mapping, Sequence, Tuple
 
 # Added by RST: Imports for normative observation spec
 import dm_env
@@ -417,6 +417,68 @@ def create_berry_prefab(lua_index: int):
       ]
   }
   return berry
+
+
+# Added by RST: Create altar (visual billboard) for treatment condition
+def create_altar_object(permitted_color_index: int, position: Tuple[int, int]) -> Dict[str, Any]:
+  """Return an altar object that displays the permitted color.
+
+  Args:
+    permitted_color_index: The permitted color (1=RED, 2=GREEN, 3=BLUE)
+    position: (row, col) position on the grid
+
+  Returns:
+    An altar game object (static visual billboard)
+  """
+  # Map color index to RGB
+  color_rgb = COLORS[permitted_color_index - 1]  # COLORS is 0-indexed
+
+  # Define a simple altar sprite (filled square with border)
+  altar_sprite = """
+********
+*&&&&&*
+*&&&&&*
+*&&&&&*
+*&&&&&*
+*&&&&&*
+*&&&&&*
+********
+"""
+
+  altar_object = {
+      "name": "altar",
+      "components": [
+          {
+              "component": "StateManager",
+              "kwargs": {
+                  "initialState": "altar",
+                  "stateConfigs": [{
+                      "state": "altar",
+                      "layer": "upperPhysical",
+                      "sprite": "Altar",
+                  }],
+              }
+          },
+          {
+              "component": "Transform",
+              "kwargs": {
+                  "position": list(position),
+                  "orientation": "N"
+              }
+          },
+          {
+              "component": "Appearance",
+              "kwargs": {
+                  "renderMode": "ascii_shape",
+                  "spriteNames": ["Altar"],
+                  "spriteShapes": [altar_sprite],
+                  "palettes": [shapes.get_palette(color_rgb)],
+                  "noRotates": [True]
+              }
+          },
+      ]
+  }
+  return altar_object
 
 
 # Edited by RST: Was def create_avatar_object(player_idx, most_tasty_berry_idx), now accepts config
@@ -1125,7 +1187,7 @@ def get_config():
   return config
 
 
-# Edited by RST: Modified to pass config to create functions
+# Edited by RST: Modified to pass config to create functions and add altar
 def build(
     roles: Sequence[str],
     config: config_dict.ConfigDict,
@@ -1133,6 +1195,17 @@ def build(
   """Build the allelopathic_harvest substrate given roles."""
   num_players = len(roles)
   game_objects = create_avatar_and_associated_objects(roles=roles, config=config)
+
+  # Added by RST: Add altar object if treatment condition is enabled
+  if (config.get('normative_gate', False) and
+      config.get('enable_treatment_condition', False) and
+      config.get('altar_coords') is not None):
+    altar_position = config.altar_coords
+    altar_object = create_altar_object(
+        permitted_color_index=config.permitted_color_index,
+        position=altar_position)
+    game_objects.append(altar_object)
+
   # Build the rest of the substrate definition.
   substrate_definition = dict(
       levelName="allelopathic_harvest",
