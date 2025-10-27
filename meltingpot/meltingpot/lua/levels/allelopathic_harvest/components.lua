@@ -991,6 +991,191 @@ function ImmunityTracker:update()
 end
 
 
+--[[ SimpleZapSanction - Avatar-level component
+Replaces GraduatedSanctionsMarking with simple immediate sanction system.
+When hit by a zap:
+  - Check immunity (fizzle if immune)
+  - Check tie-break (fizzle if already sanctioned this step)
+  - Apply -10 to target immediately (no freeze, no removal)
+  - Set target immunity
+  - Classify violation (correct vs mis-zap)
+  - Apply α/β to zapper
+  - Log sanction event
+]]
+local SimpleZapSanction = class.Class(component.Component)
+
+function SimpleZapSanction:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('SimpleZapSanction')},
+      {'playerIndex', args.numberType},
+      {'hitName', args.default('zapHit'), args.stringType},
+      {'startupGreyGrace', args.default(25), args.numberType},
+      -- Reward shaping parameters
+      {'alphaInReward', args.default(true), args.booleanType},
+      {'alphaValue', args.default(5.0), args.numberType},
+      {'betaValue', args.default(5.0), args.numberType},
+      {'misZapCostBetaEnabled', args.default(true), args.booleanType},
+  })
+  SimpleZapSanction.Base.__init__(self, kwargs)
+
+  self._config.playerIndex = kwargs.playerIndex
+  self._config.hitName = kwargs.hitName
+  self._config.startupGreyGrace = kwargs.startupGreyGrace
+  self._config.alphaInReward = kwargs.alphaInReward
+  self._config.alphaValue = kwargs.alphaValue
+  self._config.betaValue = kwargs.betaValue
+  self._config.misZapCostBetaEnabled = kwargs.misZapCostBetaEnabled
+end
+
+function SimpleZapSanction:reset()
+  -- Added by RST: No persistent state needed (all checks are per-hit)
+end
+
+function SimpleZapSanction:onHit(hitterObject, hitName)
+  -- Added by RST: Handle zap hits with simple sanction logic
+  if hitName ~= self._config.hitName then
+    return false  -- Not a zap hit, pass through
+  end
+
+  -- Get global scene components
+  local sceneObject = self.gameObject.simulation:getSceneObject()
+  local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+  local sameStepTracker = sceneObject:getComponent('SameStepSanctionTracker')
+
+  -- Get target (this avatar) state
+  local targetIndex = self._config.playerIndex
+  local targetColorZapper = self.gameObject.simulation:getAvatarFromIndex(targetIndex):getComponent('ColorZapper')
+  local targetColorId = targetColorZapper.colorId
+
+  -- Get target immunity tracker
+  local targetAvatar = self.gameObject.simulation:getAvatarFromIndex(targetIndex)
+  local immunityObjects = targetAvatar:getComponent('Avatar'):getAllConnectedObjectsWithNamedComponent('ImmunityTracker')
+  local immunityTracker = nil
+  if #immunityObjects > 0 then
+    immunityTracker = immunityObjects[1]:getComponent('ImmunityTracker')
+  end
+
+  -- Check immunity
+  local isImmune = immunityTracker and immunityTracker:isImmune()
+  if isImmune then
+    -- Fizzle: target is immune
+    self:_logSanctionEvent(hitterObject, targetIndex, targetColorId, false, false, true, true)
+    return true  -- Block beam (don't pass through)
+  end
+
+  -- Check tie-break (already sanctioned this step)
+  local alreadySanctioned = sameStepTracker:wasSanctionedThisStep(targetIndex)
+  if alreadySanctioned then
+    -- Fizzle: tie-break (another zapper already hit this target this frame)
+    self:_logSanctionEvent(hitterObject, targetIndex, targetColorId, false, false, true, false)
+    return true  -- Block beam
+  end
+
+  -- Classify violation
+  local permittedColor = permittedColorHolder:getPermittedColorIndex()
+  local currentFrame = self.gameObject.simulation:getFrameCount()
+  local isViolation = self:_isViolation(targetColorId, permittedColor, currentFrame)
+
+  -- Apply -10 to target
+  targetAvatar:getComponent('Avatar'):addReward(-10)
+
+  -- Set immunity
+  if immunityTracker then
+    immunityTracker:setImmune()
+  end
+
+  -- Mark as sanctioned this step (for tie-break)
+  sameStepTracker:markSanctioned(targetIndex)
+
+  -- Apply α/β to zapper
+  if isViolation then
+    -- Correct zap: apply +α (if enabled)
+    if self._config.alphaInReward then
+      hitterObject:getComponent('Avatar'):addReward(self._config.alphaValue)
+      -- Track alpha for accounting (will implement in NormativeRewardTracker)
+    end
+  else
+    -- Mis-zap: apply -β (if enabled)
+    if self._config.misZapCostBetaEnabled then
+      hitterObject:getComponent('Avatar'):addReward(-self._config.betaValue)
+      -- Track beta for accounting
+    end
+  end
+
+  -- Log sanction event
+  self:_logSanctionEvent(hitterObject, targetIndex, targetColorId, isViolation, true, false, false)
+
+  return true  -- Block beam (don't pass through avatars)
+end
+
+function SimpleZapSanction:_isViolation(targetColorId, permittedColor, currentFrame)
+  -- Added by RST: Classify violation based on color and grace period
+  if targetColorId == 0 then
+    -- GREY: violation only after grace period
+    return currentFrame >= self._config.startupGreyGrace
+  else
+    -- Colored: violation if not permitted color
+    return targetColorId ~= permittedColor
+  end
+end
+
+function SimpleZapSanction:_logSanctionEvent(hitterObject, targetIndex, targetColorId, wasViolation, appliedMinus10, immune, tieBreak)
+  -- Added by RST: Log sanction event for metrics
+  local zapperIndex = hitterObject:getComponent('Avatar'):getIndex()
+  local currentFrame = self.gameObject.simulation:getFrameCount()
+
+  events:add('sanction', 'dict',
+             't', currentFrame,
+             'zapper_id', zapperIndex,
+             'zappee_id', targetIndex,
+             'zappee_color', targetColorId,
+             'was_violation', wasViolation,
+             'hit', true,
+             'applied_minus10', appliedMinus10,
+             'immune', immune,
+             'tie_break', tieBreak)
+end
+
+
+--[[ ZapCostApplier - Avatar-level component
+Applies -c cost whenever the avatar fires a zap beam.
+This component watches for zap actions and immediately deducts the cost.
+]]
+local ZapCostApplier = class.Class(component.Component)
+
+function ZapCostApplier:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('ZapCostApplier')},
+      {'sanctionCostCEnabled', args.default(true), args.booleanType},
+      {'cValue', args.default(0.5), args.numberType},
+  })
+  ZapCostApplier.Base.__init__(self, kwargs)
+
+  self._config.sanctionCostCEnabled = kwargs.sanctionCostCEnabled
+  self._config.cValue = kwargs.cValue
+end
+
+function ZapCostApplier:reset()
+  -- Added by RST: No persistent state needed
+end
+
+function ZapCostApplier:postUpdate()
+  -- Added by RST: Check if zap action was taken this frame
+  if not self._config.sanctionCostCEnabled then
+    return
+  end
+
+  local avatar = self.gameObject:getComponent('Avatar')
+  local actions = avatar:getVolatileData().actions
+
+  -- Check if fireZap action was triggered (value 1 means action taken)
+  if actions['fireZap'] == 1 then
+    avatar:addReward(-self._config.cValue)
+    -- Track c cost for accounting (will implement in NormativeRewardTracker)
+  end
+end
+
+
 local allComponents = {
     -- Berry components.
     Berry = Berry,
@@ -1005,6 +1190,8 @@ local allComponents = {
     RewardForZapping = RewardForZapping,
     -- Added by RST: Normative avatar components
     ImmunityTracker = ImmunityTracker,
+    SimpleZapSanction = SimpleZapSanction,
+    ZapCostApplier = ZapCostApplier,
 
     -- Scene componenets.
     GlobalBerryTracker = GlobalBerryTracker,
