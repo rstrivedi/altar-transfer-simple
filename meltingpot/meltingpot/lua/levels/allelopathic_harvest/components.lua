@@ -872,6 +872,35 @@ function GlobalZapTracker:preUpdate()
 end
 
 
+-- ============================================================================
+-- Added by RST: Normative components for institutional rule system
+-- ============================================================================
+
+--[[ PermittedColorHolder - Scene-level component
+Stores the permitted color index for the institutional rule.
+All agents can query this to determine compliant vs violating behavior.
+]]
+local PermittedColorHolder = class.Class(component.Component)
+
+function PermittedColorHolder:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('PermittedColorHolder')},
+      {'permittedColorIndex', args.numberType},  -- 1=RED, 2=GREEN, 3=BLUE
+  })
+  PermittedColorHolder.Base.__init__(self, kwargs)
+  self._config.permittedColorIndex = kwargs.permittedColorIndex
+end
+
+function PermittedColorHolder:reset()
+  -- Added by RST: Initialize permitted color from config
+  self.permittedColorIndex = self._config.permittedColorIndex
+end
+
+function PermittedColorHolder:getPermittedColorIndex()
+  return self.permittedColorIndex
+end
+
+
 local allComponents = {
     -- Berry components.
     Berry = Berry,
@@ -888,6 +917,8 @@ local allComponents = {
     -- Scene componenets.
     GlobalBerryTracker = GlobalBerryTracker,
     GlobalZapTracker = GlobalZapTracker,
+    -- Added by RST: Normative scene components
+    PermittedColorHolder = PermittedColorHolder,
 }
 
 component_registry.registerAllComponents(allComponents)
