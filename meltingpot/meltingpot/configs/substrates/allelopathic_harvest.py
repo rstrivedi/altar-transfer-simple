@@ -35,6 +35,10 @@ preferences. arXiv preprint arXiv:2010.09054.
 
 from typing import Any, Dict, Mapping, Sequence
 
+# Added by RST: Imports for normative observation spec
+import dm_env
+import numpy as np
+
 from meltingpot.utils.substrates import colors
 from meltingpot.utils.substrates import game_object_utils
 from meltingpot.utils.substrates import shapes
@@ -960,6 +964,8 @@ def get_config():
   config.individual_observation_names = [
       "RGB",
       "READY_TO_SHOOT",
+      # Added by RST: Institutional observation (will be filtered in wrapper)
+      "PERMITTED_COLOR",
   ]
   config.global_observation_names = [
       "WORLD.RGB",
@@ -970,6 +976,9 @@ def get_config():
   config.timestep_spec = specs.timestep({
       "RGB": specs.OBSERVATION["RGB"],
       "READY_TO_SHOOT": specs.OBSERVATION["READY_TO_SHOOT"],
+      # Added by RST: One-hot encoding of permitted color (3 elements)
+      "PERMITTED_COLOR": specs.OBSERVATION.get("PERMITTED_COLOR",
+          dm_env.specs.Array(shape=(3,), dtype=np.float64, name="PERMITTED_COLOR")),
       # Debug only (do not use the following observations in policies).
       "WORLD.RGB": specs.world_rgb(DEFAULT_ASCII_MAP, SPRITE_SIZE),
   })
@@ -979,6 +988,36 @@ def get_config():
                                   "player_who_likes_red",
                                   "player_who_likes_green",
                                   "player_who_likes_blue",})
+
+  # Added by RST: Normative configuration flags
+  # Enable normative system (simple sanctions, immunity, institutional obs)
+  config.normative_gate = False  # False = base AH, True = normative version
+
+  # Treatment vs control (only applies when normative_gate=True)
+  config.enable_treatment_condition = False  # False = control, True = treatment
+
+  # Permitted color (1=RED, 2=GREEN, 3=BLUE)
+  config.permitted_color_index = 1
+
+  # Startup grace period for GREY (frames before GREY counts as violation)
+  config.startup_grey_grace = 25
+
+  # Immunity cooldown (frames after sanction before eligible again)
+  config.immunity_cooldown = 200
+
+  # Reward shaping parameters
+  config.alpha_in_reward = True  # Add +α for correct zaps (training only)
+  config.alpha_value = 5.0  # Bonus for correct zaps
+  config.beta_value = 5.0  # Penalty for mis-zaps
+  config.c_value = 0.5  # Cost per zap attempt
+  config.mis_zap_cost_beta_enabled = True  # Enable -β for mis-zaps
+  config.sanction_cost_c_enabled = True  # Enable -c for any zap
+
+  # Altar configuration (visual billboard, treatment only)
+  config.altar_coords = None  # Will auto-find floor cells or use default
+
+  # Added by RST: Builder function reference (will be set in build())
+  config.lab2d_settings_builder = build
 
   return config
 
