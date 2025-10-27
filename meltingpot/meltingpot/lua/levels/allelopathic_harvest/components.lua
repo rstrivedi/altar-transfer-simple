@@ -1092,13 +1092,23 @@ function SimpleZapSanction:onHit(hitterObject, hitName)
     -- Correct zap: apply +α (if enabled)
     if self._config.alphaInReward then
       hitterObject:getComponent('Avatar'):addReward(self._config.alphaValue)
-      -- Track alpha for accounting (will implement in NormativeRewardTracker)
+      -- Added by RST: Track alpha for accounting
+      local zapperAvatar = hitterObject:getComponent('Avatar')
+      local trackerObjects = zapperAvatar:getAllConnectedObjectsWithNamedComponent('NormativeRewardTracker')
+      if #trackerObjects > 0 then
+        trackerObjects[1]:getComponent('NormativeRewardTracker'):addAlpha(self._config.alphaValue)
+      end
     end
   else
     -- Mis-zap: apply -β (if enabled)
     if self._config.misZapCostBetaEnabled then
       hitterObject:getComponent('Avatar'):addReward(-self._config.betaValue)
-      -- Track beta for accounting
+      -- Added by RST: Track beta for accounting
+      local zapperAvatar = hitterObject:getComponent('Avatar')
+      local trackerObjects = zapperAvatar:getAllConnectedObjectsWithNamedComponent('NormativeRewardTracker')
+      if #trackerObjects > 0 then
+        trackerObjects[1]:getComponent('NormativeRewardTracker'):addBeta(self._config.betaValue)
+      end
     end
   end
 
@@ -1171,7 +1181,11 @@ function ZapCostApplier:postUpdate()
   -- Check if fireZap action was triggered (value 1 means action taken)
   if actions['fireZap'] == 1 then
     avatar:addReward(-self._config.cValue)
-    -- Track c cost for accounting (will implement in NormativeRewardTracker)
+    -- Added by RST: Track c cost for accounting
+    local trackerObjects = avatar:getAllConnectedObjectsWithNamedComponent('NormativeRewardTracker')
+    if #trackerObjects > 0 then
+      trackerObjects[1]:getComponent('NormativeRewardTracker'):addC(self._config.cValue)
+    end
   end
 end
 
@@ -1210,6 +1224,76 @@ function InstitutionalObserver:addObservations(tileSet, world, observations)
 end
 
 
+--[[ NormativeRewardTracker - Avatar-level component
+Tracks reward components separately for accounting:
+  - r_env: base environment rewards (berries, -10 sanction to target)
+  - alpha: training bonuses for correct zaps
+  - beta: penalties for mis-zaps
+  - c: effort costs for firing zaps
+
+This enables computing R_eval = R_env - beta - c (excluding alpha).
+Emits per-step events that Python wrapper aggregates.
+]]
+local NormativeRewardTracker = class.Class(component.Component)
+
+function NormativeRewardTracker:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('NormativeRewardTracker')},
+      {'playerIndex', args.numberType},
+  })
+  NormativeRewardTracker.Base.__init__(self, kwargs)
+  self._config.playerIndex = kwargs.playerIndex
+end
+
+function NormativeRewardTracker:reset()
+  -- Added by RST: Initialize per-episode accumulators
+  self._alphaSum = 0
+  self._betaSum = 0
+  self._cSum = 0
+  -- Note: r_env_sum will be computed from total reward in Python
+end
+
+function NormativeRewardTracker:addAlpha(value)
+  -- Added by RST: Track alpha bonus (called by SimpleZapSanction)
+  self._alphaSum = self._alphaSum + value
+  self:_emitRewardEvent('alpha', value)
+end
+
+function NormativeRewardTracker:addBeta(value)
+  -- Added by RST: Track beta penalty (called by SimpleZapSanction)
+  self._betaSum = self._betaSum + value
+  self:_emitRewardEvent('beta', value)
+end
+
+function NormativeRewardTracker:addC(value)
+  -- Added by RST: Track c cost (called by ZapCostApplier)
+  self._cSum = self._cSum + value
+  self:_emitRewardEvent('c', value)
+end
+
+function NormativeRewardTracker:_emitRewardEvent(rewardType, value)
+  -- Added by RST: Emit per-step reward component event
+  local currentFrame = self.gameObject.simulation:getFrameCount()
+  events:add('reward_component', 'dict',
+             't', currentFrame,
+             'player_id', self._config.playerIndex,
+             'type', rewardType,  -- 'alpha', 'beta', or 'c'
+             'value', value)
+end
+
+function NormativeRewardTracker:getAlphaSum()
+  return self._alphaSum
+end
+
+function NormativeRewardTracker:getBetaSum()
+  return self._betaSum
+end
+
+function NormativeRewardTracker:getCSum()
+  return self._cSum
+end
+
+
 local allComponents = {
     -- Berry components.
     Berry = Berry,
@@ -1227,6 +1311,7 @@ local allComponents = {
     SimpleZapSanction = SimpleZapSanction,
     ZapCostApplier = ZapCostApplier,
     InstitutionalObserver = InstitutionalObserver,
+    NormativeRewardTracker = NormativeRewardTracker,
 
     -- Scene componenets.
     GlobalBerryTracker = GlobalBerryTracker,
