@@ -901,6 +901,39 @@ function PermittedColorHolder:getPermittedColorIndex()
 end
 
 
+--[[ SameStepSanctionTracker - Scene-level component
+Prevents dogpiling: ensures only one sanction (-10) can land on any given
+target per frame. If multiple zappers hit the same target in one step, only
+the first hit applies -10; subsequent hits fizzle (but zappers still pay -c).
+]]
+local SameStepSanctionTracker = class.Class(component.Component)
+
+function SameStepSanctionTracker:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('SameStepSanctionTracker')},
+  })
+  SameStepSanctionTracker.Base.__init__(self, kwargs)
+end
+
+function SameStepSanctionTracker:reset()
+  -- Added by RST: Initialize tracking set (maps avatarIndex -> true)
+  self._sanctionedThisStep = {}
+end
+
+function SameStepSanctionTracker:preUpdate()
+  -- Added by RST: Clear tracking at the start of each frame
+  self._sanctionedThisStep = {}
+end
+
+function SameStepSanctionTracker:wasSanctionedThisStep(avatarIndex)
+  return self._sanctionedThisStep[avatarIndex] == true
+end
+
+function SameStepSanctionTracker:markSanctioned(avatarIndex)
+  self._sanctionedThisStep[avatarIndex] = true
+end
+
+
 local allComponents = {
     -- Berry components.
     Berry = Berry,
@@ -919,6 +952,7 @@ local allComponents = {
     GlobalZapTracker = GlobalZapTracker,
     -- Added by RST: Normative scene components
     PermittedColorHolder = PermittedColorHolder,
+    SameStepSanctionTracker = SameStepSanctionTracker,
 }
 
 component_registry.registerAllComponents(allComponents)
