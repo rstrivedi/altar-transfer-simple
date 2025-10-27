@@ -674,6 +674,13 @@ function ColorZapper:setColor(idx, coloredPlayerState)
   -- Change color of the player that zapped the berry to match the berry.
   overlayObject:setState(coloredPlayerState)
   self:setAvatarColorId(idx)
+
+  -- Added by RST: Clear immunity when avatar color changes (planting or grey conversion)
+  local immunityObjects = self.gameObject:getComponent(
+      'Avatar'):getAllConnectedObjectsWithNamedComponent('ImmunityTracker')
+  if #immunityObjects > 0 then
+    immunityObjects[1]:getComponent('ImmunityTracker'):clearImmunity()
+  end
 end
 
 --[[ A certain number of berries may be consumed "cryptically", i.e. without
@@ -934,6 +941,56 @@ function SameStepSanctionTracker:markSanctioned(avatarIndex)
 end
 
 
+--[[ ImmunityTracker - Avatar-level component
+Tracks immunity state for an avatar after receiving a sanction.
+Immunity prevents receiving another -10 until it's cleared by:
+  1. Color change (planting or grey conversion) - handled by ColorZapper:setColor()
+  2. 200-frame timeout - checked in update()
+]]
+local ImmunityTracker = class.Class(component.Component)
+
+function ImmunityTracker:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('ImmunityTracker')},
+      {'immunityCooldown', args.default(200), args.numberType},
+  })
+  ImmunityTracker.Base.__init__(self, kwargs)
+  self._config.immunityCooldown = kwargs.immunityCooldown
+end
+
+function ImmunityTracker:reset()
+  -- Added by RST: Initialize immunity state
+  self._immune = false
+  self._immuneSetAt = 0
+end
+
+function ImmunityTracker:isImmune()
+  return self._immune
+end
+
+function ImmunityTracker:setImmune()
+  -- Added by RST: Mark avatar as immune (called when -10 lands)
+  self._immune = true
+  self._immuneSetAt = self.gameObject.simulation:getFrameCount()
+end
+
+function ImmunityTracker:clearImmunity()
+  -- Added by RST: Clear immunity (called on color change or timeout)
+  self._immune = false
+  self._immuneSetAt = 0
+end
+
+function ImmunityTracker:update()
+  -- Added by RST: Check for timeout (200 frames since immunity was set)
+  if self._immune then
+    local currentFrame = self.gameObject.simulation:getFrameCount()
+    if currentFrame >= self._immuneSetAt + self._config.immunityCooldown then
+      self:clearImmunity()
+    end
+  end
+end
+
+
 local allComponents = {
     -- Berry components.
     Berry = Berry,
@@ -946,6 +1003,8 @@ local allComponents = {
     ColorZapper = ColorZapper,
     RewardForColoring = RewardForColoring,
     RewardForZapping = RewardForZapping,
+    -- Added by RST: Normative avatar components
+    ImmunityTracker = ImmunityTracker,
 
     -- Scene componenets.
     GlobalBerryTracker = GlobalBerryTracker,
