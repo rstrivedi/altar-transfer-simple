@@ -1176,6 +1176,40 @@ function ZapCostApplier:postUpdate()
 end
 
 
+--[[ InstitutionalObserver - Avatar-level component
+Produces PERMITTED_COLOR observation: a one-hot vector indicating which
+color is permitted by the institutional rule.
+This is the "posted rule" that treatment agents can see; control agents
+have this key removed from their observations by Python wrapper.
+]]
+local InstitutionalObserver = class.Class(component.Component)
+
+function InstitutionalObserver:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('InstitutionalObserver')},
+  })
+  InstitutionalObserver.Base.__init__(self, kwargs)
+end
+
+function InstitutionalObserver:reset()
+  -- Added by RST: Initialize observation tensor (3-element one-hot)
+  self._observation = tensor.DoubleTensor(3):fill(0)
+end
+
+function InstitutionalObserver:addObservations(tileSet, world, observations)
+  -- Added by RST: Produce PERMITTED_COLOR observation
+  local sceneObject = self.gameObject.simulation:getSceneObject()
+  local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+  local permittedColor = permittedColorHolder:getPermittedColorIndex()
+
+  -- Create one-hot encoding (1=RED, 2=GREEN, 3=BLUE)
+  self._observation:fill(0)
+  self._observation(permittedColor):fill(1)
+
+  observations['PERMITTED_COLOR'] = self._observation
+end
+
+
 local allComponents = {
     -- Berry components.
     Berry = Berry,
@@ -1192,6 +1226,7 @@ local allComponents = {
     ImmunityTracker = ImmunityTracker,
     SimpleZapSanction = SimpleZapSanction,
     ZapCostApplier = ZapCostApplier,
+    InstitutionalObserver = InstitutionalObserver,
 
     -- Scene componenets.
     GlobalBerryTracker = GlobalBerryTracker,
