@@ -132,16 +132,19 @@ Tunables:
 - Action/color constants and mappings
 
 #### 2. **ResidentObserver Lua Component** (`meltingpot/lua/.../components.lua`)
-**Commit**: 6dca512
+**Commits**: 6dca512 (initial), fab6a9d (berry detection)
 
 **What it does**:
 - Queries all avatars' positions via Transform component
 - Queries body colors via ColorZapper.getColorId()
 - Queries immunity via ImmunityTracker.getImmunityRemaining()
-- Detects ripe berries at current position
-- Detects unripe patches at current position
-- Emits `resident_info` event (permitted_color, berry flags)
+- Detects **ripe berries** within HARVEST_RADIUS=3
+- Detects **unripe berries** within PLANT_BEAM_LENGTH=3
+- Detects if standing on unripe patch
+- Emits `resident_info` event (permitted_color, berry counts, flags)
 - Emits `nearby_agent` events (agent_id, rel_pos, body_color, immune_ticks)
+- Emits `nearby_ripe_berry` events (rel_pos, distance, color_id)
+- Emits `nearby_unripe_berry` events (rel_pos, distance, color_id)
 
 **Attached to**:
 - All agents when `ego_index = None` (baseline mode)
@@ -151,12 +154,12 @@ Tunables:
 - `ImmunityTracker:getImmunityRemaining()` → frames of immunity left
 
 #### 3. **ResidentInfoExtractor** (`agents/residents/info_extractor.py`)
-**Commit**: 6dca512
+**Commits**: 6dca512 (initial), fab6a9d (berry detection)
 
 **What it does**:
-- Parses `resident_info` and `nearby_agent` events from ResidentObserver
+- Parses `resident_info`, `nearby_agent`, `nearby_ripe_berry`, and `nearby_unripe_berry` events
 - Extracts `zap_cooldown_remaining` from READY_TO_SHOOT observation
-- Converts Lua 1-indexed to Python 0-indexed
+- Converts Lua 1-indexed to Python 0-indexed for agent IDs
 - Builds structured info dict:
 ```python
 {
@@ -175,7 +178,22 @@ Tunables:
           'immune_ticks_remaining': int
         }
       ],
+      'nearby_ripe_berries': [
+        {
+          'rel_pos': (dx, dy),
+          'distance': float,
+          'color_id': int  # 1=RED, 2=GREEN, 3=BLUE
+        }
+      ],
+      'nearby_unripe_berries': [
+        {
+          'rel_pos': (dx, dy),
+          'distance': float,
+          'color_id': int
+        }
+      ],
       'has_ripe_berry_in_radius': bool,
+      'has_unripe_berry_in_range': bool,
       'standing_on_unripe': bool
     }
   }
@@ -195,66 +213,78 @@ Modified `create_avatar_object()`:
 - If ego_index=None → attach to all
 - If ego_index=0 → skip agent 0
 
----
-
-### 🚧 Remaining Components
-
-#### 3. **ResidentController** (`agents/residents/scripted_residents.py`)
-**Status**: Next to implement
+#### 5. **ResidentController** (`agents/residents/scripted_residents.py`)
+**Commits**: 0d672f2 (initial), fab6a9d (P2 fix)
 
 **Interface**:
 ```python
 class ResidentController:
-    def reset(seed: int, cfg: dict) -> None
+    def reset(seed: int = 42) -> None
     def act(resident_id: int, info: dict) -> int  # Returns action index
 ```
 
-**Implementation**:
-- P1: Check eligible targets, zap nearest
-- P2: If standing on unripe, plant permitted color
-- P3: If ripe berry nearby, move toward it (greedy)
-- P4: Patrol with persistence (RNG seeded)
+**Implementation (P1-P4 priority order)**:
+- **P1 (Zap)**: Check eligible targets (violating AND not immune), zap nearest (tie-break: lowest agent_id)
+- **P2 (Plant)**: If unripe berries within beam range (3 cells), plant permitted color
+- **P3 (Harvest)**: If ripe berries nearby (radius 3), move toward nearest using greedy pathfinding
+- **P4 (Patrol)**: Random direction {FORWARD, TURN_LEFT, TURN_RIGHT}, persist for 8 frames
 
 **Action Selection**:
 - Zap: action = 7 (FIRE_ZAP)
 - Plant: action = 8/9/10 (FIRE_ONE/TWO/THREE based on permitted color)
-- Move toward berry: Greedy turn + forward
-- Patrol: Random from {FORWARD=1, TURN_LEFT=5, TURN_RIGHT=6}, persist 8 frames
+- Harvest: Greedy turn + forward toward nearest ripe berry
+- Patrol: Random from PATROL_DIRECTIONS, persist 8 frames (seeded RNG for determinism)
 
-#### 4. **ResidentWrapper** (`agents/envs/resident_wrapper.py`)
-**Status**: Not started
+**Key Fix (fab6a9d)**: P2 now uses beam range (3 cells) instead of requiring standing on unripe berry. Residents can plant from distance.
 
-**Purpose**: Wrapper that calls ResidentController for designated agents
+#### 6. **ResidentWrapper** (`agents/envs/resident_wrapper.py`)
+**Commit**: 703c501
+
+**Purpose**: Wrapper that automatically generates resident actions while allowing external ego control
 
 **Interface**:
 ```python
 class ResidentWrapper:
-    def __init__(env, resident_indices, ego_index, resident_controller, extractor)
+    def __init__(env, resident_indices, ego_index, resident_controller, info_extractor)
     def reset() -> timestep
-    def step(ego_action) -> timestep  # Combines ego + resident actions
+    def step(ego_action: Optional[int] = None) -> timestep
 ```
 
 **Logic**:
-- Extract info via ResidentInfoExtractor
-- Get resident actions from ResidentController
-- Combine with ego action
-- Step environment
+1. Store last timestep for observation access
+2. On step(), extract info from last observations + current events
+3. For each agent: if ego → use provided action, if resident → call controller.act()
+4. Combine all actions and step base environment
+5. Store new timestep for next step
 
-#### 5. **Acceptance Tests R1-R8** (`agents/tests/phase2_residents_tests.py`)
-**Status**: Not started
+**Modes**:
+- **Training** (`ego_index=0`): ego_action required, residents auto-act
+- **Baseline** (`ego_index=None`): ego_action=None, all 16 residents auto-act
 
-**Tests**:
-- **R1**: Selectivity - residents never zap compliant agents
-- **R2**: Coverage - ≥80% of violators sanctioned within 10 frames
-- **R3**: No dogpiling - no duplicate -10 on immune targets, residents don't attempt
-- **R4**: Plant/harvest purity - 100% plant permitted, ≥95% harvest permitted
-- **R5**: Arm invariance - identical decisions in control vs treatment
-- **R6**: Same-step tie-break - only one -10 lands when multiple zaps
-- **R7**: No hidden dependencies - grep for freeze/removal references
-- **R8**: Monoculture achievement - ≥85% permitted berries at t=2000
+#### 7. **Acceptance Tests R1-R8** (`agents/tests/test_phase2_residents.py`)
+**Commit**: 2aa3058
 
-#### 6. **PHASE2_README.md**
-**Status**: This file (in progress)
+**All tests use actual Lua events and observations** (not proxies):
+
+- **R1 (Selectivity)**: Track `reward_component` events, verify beta=0 (no mis-zaps)
+- **R2 (Coverage)**: Track `sanction` events, verify ≥80% sanctioned within 10 frames
+- **R3 (No Dogpiling)**: Check `sanction.immune` field, verify no sanctions on immune targets
+- **R4 (Purity)**: Track `replanting` and `eating` events, verify 100% plant permitted, ≥95% harvest permitted
+- **R5 (Arm Invariance)**: Parallel control/treatment envs with same seed, verify identical actions
+- **R6 (Tie-Break)**: Track timestep.reward, verify no single-step penalty < -10
+- **R7 (No Dependencies)**: Grep components.lua for freeze/removal references
+- **R8 (Monoculture)**: Use `BERRIES_BY_TYPE` observation from GlobalBerryTracker, verify ≥85% permitted berries
+
+**R8 includes video rendering**: Captures RGB frames every step, saves as mp4 (or .npy), shows monoculture progression over 2000 steps.
+
+**Event names used**:
+- `reward_component`: fields `type` ('alpha'/'beta'/'c'), `value`
+- `sanction`: fields `zapper_id`, `zappee_id`, `immune`, `applied_minus10`
+- `replanting`: field `target_berry`
+- `eating`: field `berry_color`
+
+**Observations used**:
+- `BERRIES_BY_TYPE`: shape (3,) for [RED, GREEN, BLUE] counts from GlobalBerryTracker
 
 ---
 
@@ -396,23 +426,81 @@ We approximate zap cooldown from READY_TO_SHOOT (binary). If not ready, assume f
 
 ---
 
-## Next Steps (Component-by-Component)
+## Phase 2 Completion Status
+
+All components are **COMPLETE** ✅:
 
 1. ✅ `config.py` - Tunables
-2. ✅ `info_extractor.py` + ResidentObserver Lua component
-3. 🚧 `scripted_residents.py` - ResidentController with P1-P4 logic
-4. ⬜ `resident_wrapper.py` - Integration with environment
-5. ⬜ `phase2_residents_tests.py` - R1-R4 tests
-6. ⬜ `phase2_residents_tests.py` - R5-R8 tests
-7. ⬜ Final PHASE2_README.md update
+2. ✅ `info_extractor.py` + ResidentObserver Lua component (with berry detection)
+3. ✅ `scripted_residents.py` - ResidentController with P1-P4 logic
+4. ✅ `resident_wrapper.py` - Integration with environment
+5. ✅ `phase2_residents_tests.py` - R1-R4 tests
+6. ✅ `phase2_residents_tests.py` - R5-R8 tests (including R8 video rendering)
+7. ✅ PHASE2_README.md - Final documentation
 
 ---
 
-## Commits So Far (Phase 2 Branch)
+## All Phase 2 Commits (phase-2 branch)
 
 1. **23d9402**: Add resident agent configuration
 2. **6dca512**: Add ResidentObserver component and info extractor
+3. **0d672f2**: Add ResidentController with P1-P4 equilibrium policy
+4. **fab6a9d**: Fix P2 planting to use beam range instead of requiring standing on berry
+5. **703c501**: Add ResidentWrapper for automatic resident agent control
+6. **2aa3058**: Add Phase 2 acceptance tests R1-R8 for resident agents
 
-**Total changes**: 2 commits, ~350 lines of code (Lua + Python)
+**Total changes**: 6 commits, ~1200 lines of code (Lua + Python + tests)
 
 **Branch**: `phase-2` (based on `phase-1`)
+
+---
+
+## Notes for Next Session
+
+### Critical Process Requirements (DO NOT VIOLATE)
+1. **ALWAYS show code for review before committing** - User will explicitly approve
+2. **NEVER add Claude as co-author** - Only user (RST) is author
+3. **Study codebase thoroughly** - Look up exact event names, field names, observations
+4. **Follow conventions** - Use "Added by RST:" in comments
+5. **No "weird bets"** - Don't guess what exists; grep/read to verify
+
+### Phase 2 Implementation Summary
+Phase 2 is **COMPLETE**. All resident agents are implemented and tested:
+- Deterministic scripted behavior (P1-P4 priority policy)
+- Play at equilibrium (enforce violations, achieve monoculture)
+- Privileged info access via ResidentObserver
+- Identical behavior in control/treatment
+- All acceptance tests R1-R8 pass
+- R8 includes video rendering for monoculture verification
+
+### Key Technical Details to Remember
+- **Episode length**: 2000 steps (not 1000)
+- **Color indexing**: 1-indexed in Lua (1=RED, 2=GREEN, 3=BLUE, 0=GREY)
+- **Plant beam**: beamLength=3, beamRadius=0 (can plant from 3 cells away)
+- **Zap range**: 3 cells, cooldown=4 frames
+- **Grace period**: 25 frames (startup_grey_grace)
+- **Immunity**: 200 frames per target, clears on color change
+
+### Actual Lua Events (NOT Proxies)
+- `reward_component`: fields `type` ('alpha'/'beta'/'c'), `value`
+- `sanction`: fields `zapper_id`, `zappee_id`, `immune`, `applied_minus10`
+- `replanting`: field `target_berry` (1-indexed color)
+- `eating`: field `berry_color` (1-indexed color)
+- `resident_info`: fields `permitted_color`, `ripe_berries_by_type`, `unripe_berries_by_type`, `standing_on_unripe`
+- `nearby_agent`: fields `agent_id`, `rel_x`, `rel_y`, `body_color`, `immune_ticks`
+- `nearby_ripe_berry`: fields `observer_index`, `rel_x`, `rel_y`, `distance`, `color_id`
+- `nearby_unripe_berry`: fields `observer_index`, `rel_x`, `rel_y`, `distance`, `color_id`
+
+### Actual Observations (GlobalBerryTracker)
+- `BERRIES_BY_TYPE`: shape (3,) for [RED, GREEN, BLUE] total counts
+- `RIPE_BERRIES_BY_TYPE`: shape (3,) for [RED, GREEN, BLUE] ripe counts
+- `UNRIPE_BERRIES_BY_TYPE`: shape (3,) for [RED, GREEN, BLUE] unripe counts
+
+### What's Next (Phase 3+)
+Phase 2 is complete. Next phases may include:
+- Training ego agent with PPO
+- Transfer learning experiments
+- Metrics collection and analysis
+- Visualization and reporting
+
+**Wait for user's explicit instructions before starting Phase 3.**
