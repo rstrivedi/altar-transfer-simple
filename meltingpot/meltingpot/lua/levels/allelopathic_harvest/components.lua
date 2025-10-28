@@ -990,6 +990,17 @@ function ImmunityTracker:update()
   end
 end
 
+function ImmunityTracker:getImmunityRemaining()
+  -- Added by RST: Return frames of immunity remaining
+  if not self._immune then
+    return 0
+  end
+  local currentFrame = self.gameObject.simulation:getFrameCount()
+  local elapsed = currentFrame - self._immuneSetAt
+  local remaining = self._config.immunityCooldown - elapsed
+  return math.max(0, remaining)
+end
+
 
 --[[ SimpleZapSanction - Avatar-level component
 Replaces GraduatedSanctionsMarking with simple immediate sanction system.
@@ -1294,6 +1305,135 @@ function NormativeRewardTracker:getCSum()
 end
 
 
+-- Added by RST: ResidentObserver - provides privileged state for resident agents
+local ResidentObserver = class.Class(component.Component)
+
+function ResidentObserver:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('ResidentObserver')},
+  })
+  ResidentObserver.Base.__init__(self, kwargs)
+end
+
+function ResidentObserver:reset()
+  -- Initialize observation tensors
+  -- For now, keep it simple and expose as strings/numbers
+  self._observation = {}
+end
+
+function ResidentObserver:addObservations(tileSet, world, observations)
+  -- Added by RST: Provide privileged info for residents
+  -- Query all agents in the simulation
+  local allAvatars = self.gameObject.simulation:getAllGameObjectsWithComponent('Avatar')
+
+  local selfIndex = self.gameObject:getComponent('Avatar'):getIndex()
+
+  -- Get scene-level info
+  local sceneObject = self.gameObject.simulation:getSceneObject()
+  local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+  local permittedColor = permittedColorHolder:getPermittedColorIndex()
+
+  -- Get own position
+  local selfPos = self.gameObject:getPosition()
+
+  -- Build list of nearby agents (within zap range)
+  local nearbyAgents = {}
+  local zapRange = 3  -- Match ZAP_RANGE from config
+
+  for _, avatarObj in ipairs(allAvatars) do
+    local otherIndex = avatarObj:getComponent('Avatar'):getIndex()
+    if otherIndex ~= selfIndex then
+      local otherPos = avatarObj:getPosition()
+      local dx = otherPos[1] - selfPos[1]
+      local dy = otherPos[2] - selfPos[2]
+      local distance = math.sqrt(dx * dx + dy * dy)
+
+      if distance <= zapRange then
+        -- Get color from ColorZapper component
+        local colorZapper = avatarObj:getComponent('ColorZapper')
+        local bodyColor = colorZapper and colorZapper:getColorId() or 0  -- 0=GREY default
+
+        -- Get immunity from ImmunityTracker
+        local immunityObjects = avatarObj:getAllConnectedObjectsWithNamedComponent('ImmunityTracker')
+        local immuneTicks = 0
+        if #immunityObjects > 0 then
+          local immunityTracker = immunityObjects[1]:getComponent('ImmunityTracker')
+          immuneTicks = immunityTracker:getImmunityRemaining()
+        end
+
+        table.insert(nearbyAgents, {
+          agent_id = otherIndex,
+          rel_pos = {dx, dy},
+          body_color = bodyColor,
+          immune_ticks_remaining = immuneTicks
+        })
+      end
+    end
+  end
+
+  -- Check for ripe berries nearby (simplified: just check if any exist in range)
+  local hasRipeBerry = false
+  local standingOnUnripe = false
+
+  -- Query objects at current position
+  local objectsHere = self.gameObject:getComponent('Transform'):queryPosition('lowerPhysical')
+  if objectsHere and objectsHere:hasComponent('Berry') then
+    local berry = objectsHere:getComponent('Berry')
+    if berry:isRipe() then
+      hasRipeBerry = true
+    else
+      standingOnUnripe = true
+    end
+  end
+
+  -- Check surrounding tiles for ripe berries (3x3 around agent)
+  if not hasRipeBerry then
+    for dx = -3, 3 do
+      for dy = -3, 3 do
+        if dx ~= 0 or dy ~= 0 then
+          local checkPos = {selfPos[1] + dx, selfPos[2] + dy}
+          local objectsAtPos = world:getHitName(checkPos)
+          -- This is a simplified check; in practice would need more robust berry detection
+        end
+      end
+    end
+  end
+
+  -- Encode as observation
+  -- We'll use a structured format that Python can parse
+  local obsData = {
+    permitted_color_index = permittedColor,
+    nearby_agents = nearbyAgents,
+    has_ripe_berry_in_radius = hasRipeBerry,
+    standing_on_unripe = standingOnUnripe,
+  }
+
+  -- Store as observation (Python will need to parse this)
+  observations['RESIDENT_INFO'] = tensor.DoubleTensor({1}):fill(1)  -- Placeholder
+  -- Note: dmlab2d observations must be tensors, not tables
+  -- We'll rely on events to pass the structured data instead
+
+  -- Emit as event for Python to parse
+  events:add('resident_info', 'dict',
+             'player_index', selfIndex,
+             'permitted_color', permittedColor,
+             'nearby_agents_count', #nearbyAgents,
+             'has_ripe_berry', hasRipeBerry and 1 or 0,
+             'standing_on_unripe', standingOnUnripe and 1 or 0)
+
+  -- Also emit individual nearby agent events
+  for _, agentInfo in ipairs(nearbyAgents) do
+    events:add('nearby_agent', 'dict',
+               'observer_index', selfIndex,
+               'agent_id', agentInfo.agent_id,
+               'rel_x', agentInfo.rel_pos[1],
+               'rel_y', agentInfo.rel_pos[2],
+               'body_color', agentInfo.body_color,
+               'immune_ticks', agentInfo.immune_ticks_remaining)
+  end
+end
+
+
 local allComponents = {
     -- Berry components.
     Berry = Berry,
@@ -1312,6 +1452,7 @@ local allComponents = {
     ZapCostApplier = ZapCostApplier,
     InstitutionalObserver = InstitutionalObserver,
     NormativeRewardTracker = NormativeRewardTracker,
+    ResidentObserver = ResidentObserver,
 
     -- Scene componenets.
     GlobalBerryTracker = GlobalBerryTracker,

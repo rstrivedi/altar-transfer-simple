@@ -651,6 +651,17 @@ def create_avatar_object(player_idx: int,
         "kwargs": {}
     })
 
+    # Added by RST: Add ResidentObserver only to resident agents (not ego)
+    # If ego_index is None (all-residents mode), add to everyone
+    # If ego_index is set (e.g., 0), skip that agent
+    ego_index = config.get('ego_index', None)
+    is_ego = (ego_index is not None and player_idx == ego_index)
+    if not is_ego:
+      avatar_object["components"].append({
+          "component": "ResidentObserver",
+          "kwargs": {}
+      })
+
   return avatar_object
 
 # PREFABS is a dictionary mapping names to template game objects that can
@@ -1180,6 +1191,9 @@ def get_config():
 
   # Altar configuration (visual billboard, treatment only)
   config.altar_coords = None  # Will auto-find floor cells or use default
+
+  # Added by RST: Resident vs ego designation
+  config.ego_index = None  # None = all-residents mode, 0 = training mode (agent 0 is ego)
 
   # Added by RST: Builder function reference (will be set in build())
   config.lab2d_settings_builder = build
