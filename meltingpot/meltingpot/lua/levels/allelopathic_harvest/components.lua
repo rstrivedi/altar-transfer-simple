@@ -1371,33 +1371,41 @@ function ResidentObserver:addObservations(tileSet, world, observations)
     end
   end
 
-  -- Check for ripe berries nearby (simplified: just check if any exist in range)
-  local hasRipeBerry = false
+  -- Query all berries in the simulation and find nearby ripe ones
+  local allBerries = self.gameObject.simulation:getAllGameObjectsWithComponent('Berry')
+  local nearbyRipeBerries = {}
+  local harvestRadius = 3  -- Match HARVEST_RADIUS from config
   local standingOnUnripe = false
 
   -- Query objects at current position
   local objectsHere = self.gameObject:getComponent('Transform'):queryPosition('lowerPhysical')
   if objectsHere and objectsHere:hasComponent('Berry') then
     local berry = objectsHere:getComponent('Berry')
-    if berry:isRipe() then
-      hasRipeBerry = true
-    else
+    if not berry:isRipe() then
       standingOnUnripe = true
     end
   end
 
-  -- Check surrounding tiles for ripe berries (3x3 around agent)
-  if not hasRipeBerry then
-    for dx = -3, 3 do
-      for dy = -3, 3 do
-        if dx ~= 0 or dy ~= 0 then
-          local checkPos = {selfPos[1] + dx, selfPos[2] + dy}
-          local objectsAtPos = world:getHitName(checkPos)
-          -- This is a simplified check; in practice would need more robust berry detection
-        end
+  -- Find all ripe berries within harvest radius
+  for _, berryObj in ipairs(allBerries) do
+    local berry = berryObj:getComponent('Berry')
+    if berry:isRipe() then
+      local berryPos = berryObj:getPosition()
+      local dx = berryPos[1] - selfPos[1]
+      local dy = berryPos[2] - selfPos[2]
+      local distance = math.sqrt(dx * dx + dy * dy)
+
+      if distance <= harvestRadius then
+        table.insert(nearbyRipeBerries, {
+          rel_pos = {dx, dy},
+          distance = distance,
+          color_id = berry:getBerryColorId()
+        })
       end
     end
   end
+
+  local hasRipeBerry = #nearbyRipeBerries > 0
 
   -- Encode as observation
   -- We'll use a structured format that Python can parse
@@ -1418,10 +1426,11 @@ function ResidentObserver:addObservations(tileSet, world, observations)
              'player_index', selfIndex,
              'permitted_color', permittedColor,
              'nearby_agents_count', #nearbyAgents,
+             'nearby_berries_count', #nearbyRipeBerries,
              'has_ripe_berry', hasRipeBerry and 1 or 0,
              'standing_on_unripe', standingOnUnripe and 1 or 0)
 
-  -- Also emit individual nearby agent events
+  -- Emit individual nearby agent events
   for _, agentInfo in ipairs(nearbyAgents) do
     events:add('nearby_agent', 'dict',
                'observer_index', selfIndex,
@@ -1430,6 +1439,16 @@ function ResidentObserver:addObservations(tileSet, world, observations)
                'rel_y', agentInfo.rel_pos[2],
                'body_color', agentInfo.body_color,
                'immune_ticks', agentInfo.immune_ticks_remaining)
+  end
+
+  -- Emit individual nearby berry events
+  for _, berryInfo in ipairs(nearbyRipeBerries) do
+    events:add('nearby_berry', 'dict',
+               'observer_index', selfIndex,
+               'rel_x', berryInfo.rel_pos[1],
+               'rel_y', berryInfo.rel_pos[2],
+               'distance', berryInfo.distance,
+               'color_id', berryInfo.color_id)
   end
 end
 

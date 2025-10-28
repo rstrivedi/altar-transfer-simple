@@ -71,6 +71,7 @@ class ResidentInfoExtractor:
           'pos': (0, 0),  # Will be updated from events if available
           'zap_cooldown_remaining': zap_cooldown_remaining,
           'nearby_agents': [],
+          'nearby_berries': [],
           'has_ripe_berry_in_radius': False,
           'standing_on_unripe': False,
       }
@@ -82,14 +83,15 @@ class ResidentInfoExtractor:
     return info
 
   def _parse_resident_observer_events(self, events: List[Dict], info: Dict):
-    """Parse resident_info and nearby_agent events from ResidentObserver.
+    """Parse resident_info, nearby_agent, and nearby_berry events from ResidentObserver.
 
     Args:
       events: List of events from env.events().
       info: Info dictionary to update.
     """
-    # First, collect nearby_agent events by observer
+    # Collect nearby_agent and nearby_berry events by observer
     nearby_agents_by_observer = {}
+    nearby_berries_by_observer = {}
 
     for event in events:
       event_name = event.get('name', '')
@@ -137,7 +139,38 @@ class ResidentInfoExtractor:
             'immune_ticks_remaining': immune_ticks
         })
 
+      elif event_name == 'nearby_berry':
+        # Nearby berry event
+        observer_index = event.get('observer_index')
+        if observer_index is None:
+          continue
+
+        # Convert from 1-indexed (Lua) to 0-indexed (Python)
+        observer_id = observer_index - 1
+        if observer_id < 0 or observer_id >= self._num_players:
+          continue
+
+        rel_x = event.get('rel_x', 0)
+        rel_y = event.get('rel_y', 0)
+        distance = event.get('distance', 0)
+        color_id = event.get('color_id', 0)
+
+        # Store in temporary structure
+        if observer_id not in nearby_berries_by_observer:
+          nearby_berries_by_observer[observer_id] = []
+
+        nearby_berries_by_observer[observer_id].append({
+            'rel_pos': (rel_x, rel_y),
+            'distance': distance,
+            'color_id': color_id
+        })
+
     # Update nearby_agents in info
     for observer_id, nearby_agents in nearby_agents_by_observer.items():
       if observer_id in info['residents']:
         info['residents'][observer_id]['nearby_agents'] = nearby_agents
+
+    # Update nearby_berries in info
+    for observer_id, nearby_berries in nearby_berries_by_observer.items():
+      if observer_id in info['residents']:
+        info['residents'][observer_id]['nearby_berries'] = nearby_berries
