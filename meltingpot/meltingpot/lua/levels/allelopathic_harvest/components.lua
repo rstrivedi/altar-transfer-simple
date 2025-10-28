@@ -1336,6 +1336,10 @@ function ResidentObserver:addObservations(tileSet, world, observations)
   -- Get own position
   local selfPos = self.gameObject:getPosition()
 
+  -- Added by RST: Get own body color for telemetry
+  local selfColorZapper = self.gameObject:getComponent('ColorZapper')
+  local selfBodyColor = selfColorZapper and selfColorZapper:getColorId() or 0  -- 0=GREY default
+
   -- Build list of nearby agents (within zap range)
   local nearbyAgents = {}
   local zapRange = 3  -- Match ZAP_RANGE from config
@@ -1434,9 +1438,11 @@ function ResidentObserver:addObservations(tileSet, world, observations)
   -- We'll rely on events to pass the structured data instead
 
   -- Emit as event for Python to parse
+  -- Added by RST: Include self_body_color for telemetry (Phase 3)
   events:add('resident_info', 'dict',
              'player_index', selfIndex,
              'permitted_color', permittedColor,
+             'self_body_color', selfBodyColor,  -- Added by RST: 0=GREY, 1=RED, 2=GREEN, 3=BLUE
              'nearby_agents_count', #nearbyAgents,
              'nearby_ripe_berries_count', #nearbyRipeBerries,
              'nearby_unripe_berries_count', #nearbyUnripeBerries,
