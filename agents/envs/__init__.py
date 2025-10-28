@@ -3,5 +3,10 @@
 
 from agents.envs.normative_observation_filter import NormativeObservationFilter
 from agents.envs.normative_metrics_logger import NormativeMetricsLogger
+from agents.envs.resident_wrapper import ResidentWrapper
 
-__all__ = ['NormativeObservationFilter', 'NormativeMetricsLogger']
+__all__ = [
+    'NormativeObservationFilter',
+    'NormativeMetricsLogger',
+    'ResidentWrapper',
+]
