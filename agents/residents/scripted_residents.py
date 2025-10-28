@@ -149,7 +149,9 @@ class ResidentController:
     return cfg.ACTION_FIRE_ZAP
 
   def _try_plant(self, resident_info: Dict, permitted: int) -> Optional[int]:
-    """P2: Try to plant permitted color on unripe patch.
+    """P2: Try to plant permitted color on nearby unripe berries.
+
+    Note: Plant beam has beamLength=3, so can plant from up to 3 cells away.
 
     Args:
       resident_info: Resident's info dict.
@@ -158,9 +160,19 @@ class ResidentController:
     Returns:
       Plant action if should plant, None otherwise.
     """
-    if resident_info['standing_on_unripe']:
-      return cfg.PLANT_ACTION_MAP[permitted]
-    return None
+    nearby_unripe_berries = resident_info.get('nearby_unripe_berries', [])
+
+    if not nearby_unripe_berries:
+      return None
+
+    # Plant the nearest unripe berry
+    # Note: In this simplified version, we just fire the plant beam.
+    # The beam will hit unripe berries in the direction the agent is facing.
+    # Ideally we'd track orientation and turn toward the berry first,
+    # but for equilibrium play, simply planting when unripe berries are nearby
+    # should achieve monoculture over time.
+
+    return cfg.PLANT_ACTION_MAP[permitted]
 
   def _try_harvest(self, resident_info: Dict) -> Optional[int]:
     """P3: Try to move toward nearest ripe berry.
@@ -171,7 +183,7 @@ class ResidentController:
     Returns:
       Movement action if should harvest, None otherwise.
     """
-    nearby_berries = resident_info.get('nearby_berries', [])
+    nearby_berries = resident_info.get('nearby_ripe_berries', [])
 
     if not nearby_berries:
       return None

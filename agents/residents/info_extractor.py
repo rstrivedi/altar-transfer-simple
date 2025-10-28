@@ -71,8 +71,10 @@ class ResidentInfoExtractor:
           'pos': (0, 0),  # Will be updated from events if available
           'zap_cooldown_remaining': zap_cooldown_remaining,
           'nearby_agents': [],
-          'nearby_berries': [],
+          'nearby_ripe_berries': [],
+          'nearby_unripe_berries': [],
           'has_ripe_berry_in_radius': False,
+          'has_unripe_berry_in_range': False,
           'standing_on_unripe': False,
       }
 
@@ -83,15 +85,16 @@ class ResidentInfoExtractor:
     return info
 
   def _parse_resident_observer_events(self, events: List[Dict], info: Dict):
-    """Parse resident_info, nearby_agent, and nearby_berry events from ResidentObserver.
+    """Parse resident_info, nearby_agent, nearby_ripe_berry, and nearby_unripe_berry events.
 
     Args:
       events: List of events from env.events().
       info: Info dictionary to update.
     """
-    # Collect nearby_agent and nearby_berry events by observer
+    # Collect events by observer
     nearby_agents_by_observer = {}
-    nearby_berries_by_observer = {}
+    nearby_ripe_berries_by_observer = {}
+    nearby_unripe_berries_by_observer = {}
 
     for event in events:
       event_name = event.get('name', '')
@@ -109,6 +112,7 @@ class ResidentInfoExtractor:
 
         # Update berry info
         info['residents'][agent_id]['has_ripe_berry_in_radius'] = bool(event.get('has_ripe_berry', 0))
+        info['residents'][agent_id]['has_unripe_berry_in_range'] = bool(event.get('has_unripe_berry', 0))
         info['residents'][agent_id]['standing_on_unripe'] = bool(event.get('standing_on_unripe', 0))
 
       elif event_name == 'nearby_agent':
@@ -139,8 +143,8 @@ class ResidentInfoExtractor:
             'immune_ticks_remaining': immune_ticks
         })
 
-      elif event_name == 'nearby_berry':
-        # Nearby berry event
+      elif event_name == 'nearby_ripe_berry':
+        # Nearby ripe berry event
         observer_index = event.get('observer_index')
         if observer_index is None:
           continue
@@ -156,10 +160,36 @@ class ResidentInfoExtractor:
         color_id = event.get('color_id', 0)
 
         # Store in temporary structure
-        if observer_id not in nearby_berries_by_observer:
-          nearby_berries_by_observer[observer_id] = []
+        if observer_id not in nearby_ripe_berries_by_observer:
+          nearby_ripe_berries_by_observer[observer_id] = []
 
-        nearby_berries_by_observer[observer_id].append({
+        nearby_ripe_berries_by_observer[observer_id].append({
+            'rel_pos': (rel_x, rel_y),
+            'distance': distance,
+            'color_id': color_id
+        })
+
+      elif event_name == 'nearby_unripe_berry':
+        # Nearby unripe berry event
+        observer_index = event.get('observer_index')
+        if observer_index is None:
+          continue
+
+        # Convert from 1-indexed (Lua) to 0-indexed (Python)
+        observer_id = observer_index - 1
+        if observer_id < 0 or observer_id >= self._num_players:
+          continue
+
+        rel_x = event.get('rel_x', 0)
+        rel_y = event.get('rel_y', 0)
+        distance = event.get('distance', 0)
+        color_id = event.get('color_id', 0)
+
+        # Store in temporary structure
+        if observer_id not in nearby_unripe_berries_by_observer:
+          nearby_unripe_berries_by_observer[observer_id] = []
+
+        nearby_unripe_berries_by_observer[observer_id].append({
             'rel_pos': (rel_x, rel_y),
             'distance': distance,
             'color_id': color_id
@@ -170,7 +200,12 @@ class ResidentInfoExtractor:
       if observer_id in info['residents']:
         info['residents'][observer_id]['nearby_agents'] = nearby_agents
 
-    # Update nearby_berries in info
-    for observer_id, nearby_berries in nearby_berries_by_observer.items():
+    # Update nearby_ripe_berries in info
+    for observer_id, nearby_ripe_berries in nearby_ripe_berries_by_observer.items():
       if observer_id in info['residents']:
-        info['residents'][observer_id]['nearby_berries'] = nearby_berries
+        info['residents'][observer_id]['nearby_ripe_berries'] = nearby_ripe_berries
+
+    # Update nearby_unripe_berries in info
+    for observer_id, nearby_unripe_berries in nearby_unripe_berries_by_observer.items():
+      if observer_id in info['residents']:
+        info['residents'][observer_id]['nearby_unripe_berries'] = nearby_unripe_berries
