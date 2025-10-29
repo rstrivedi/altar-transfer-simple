@@ -1,21 +1,21 @@
-# Added by RST: Main training script for Phase 4 PPO
-"""Train PPO agent with FiLM-conditioned two-head policy.
+# Added by RST: Main training script for Phase 4 & 5 PPO
+"""Train PPO agent with FiLM-conditioned two-head policy (Phase 4 & 5).
 
 This script trains a single ego agent (agent 0) in presence of 15 scripted residents.
 Supports treatment (with PERMITTED_COLOR) and control (without) arms.
 
 Usage:
-    # Treatment arm
+    # Phase 4: Single-community training
     python agents/train/train_ppo.py --arm treatment --config configs/treatment.yaml
 
-    # Control arm
-    python agents/train/train_ppo.py --arm control --config configs/control.yaml
+    # Phase 5: Multi-community training (distributional competence)
+    python agents/train/train_ppo.py --arm treatment --config configs/treatment_multi.yaml --multi-community
 
     # Custom hyperparameters
-    python agents/train/train_ppo.py --arm treatment --total-timesteps 5000000 --n-envs 16
+    python agents/train/train_ppo.py --arm treatment --total-timesteps 5000000 --n-envs 32 --multi-community
 
 The script:
-1. Creates vectorized environments (treatment or control)
+1. Creates vectorized environments (treatment or control, single or multi-community)
 2. Instantiates FiLM two-head policy
 3. Sets up W&B logging, checkpointing, and evaluation callbacks
 4. Trains with PPO
@@ -32,7 +32,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 from stable_baselines3.common.callbacks import CallbackList
 
-from agents.envs.sb3_wrapper import make_vec_env_treatment, make_vec_env_control
+from agents.envs.sb3_wrapper import make_vec_env_treatment, make_vec_env_control, make_vec_env_multi_community
 from agents.train.film_policy import FiLMTwoHeadPolicy
 
 
@@ -131,7 +131,14 @@ def get_default_config() -> Dict:
     }
 
 
-def make_vec_env(arm: str, config: Dict, n_envs: int, seed: int, enable_telemetry: bool = False):
+def make_vec_env(
+    arm: str,
+    config: Dict,
+    n_envs: int,
+    seed: int,
+    enable_telemetry: bool = False,
+    multi_community: bool = False,
+):
     """Create vectorized environment (treatment or control).
 
     Args:
@@ -140,10 +147,23 @@ def make_vec_env(arm: str, config: Dict, n_envs: int, seed: int, enable_telemetr
         n_envs: Number of parallel environments
         seed: Base random seed
         enable_telemetry: Whether to enable MetricsRecorder
+        multi_community: If True, use multi-community mode (Phase 5)
 
     Returns:
         Vectorized environment
     """
+    # Phase 5: Multi-community mode (independent sampling)
+    if multi_community:
+        vec_env = make_vec_env_multi_community(
+            arm=arm,
+            num_envs=n_envs,
+            config=config,
+            seed=seed,
+            enable_telemetry=enable_telemetry,
+        )
+        return vec_env
+
+    # Phase 4: Single-community mode
     # Generate seeds for each environment
     rng = np.random.RandomState(seed)
     env_seeds = rng.randint(0, 1_000_000, size=n_envs).tolist()
@@ -173,6 +193,7 @@ def train(
     config: Dict,
     output_dir: str = './outputs',
     verbose: int = 1,
+    multi_community: bool = False,
 ):
     """Train PPO agent.
 
@@ -181,9 +202,11 @@ def train(
         config: Configuration dict
         output_dir: Directory to save outputs
         verbose: Verbosity level
+        multi_community: If True, use multi-community mode (Phase 5)
     """
     print(f"\n{'='*80}")
-    print(f"Phase 4 Training: {arm.upper()} Arm")
+    mode = "Phase 5 (Multi-Community)" if multi_community else "Phase 4 (Single-Community)"
+    print(f"{mode} Training: {arm.upper()} Arm")
     print(f"{'='*80}\n")
 
     # Create output directory
@@ -198,13 +221,15 @@ def train(
     checkpoint_config = config['checkpointing']
 
     # Create vectorized environment
-    print(f"Creating {training_config['n_envs']} vectorized environments...")
+    mode_str = "multi-community" if multi_community else "single-community"
+    print(f"Creating {training_config['n_envs']} vectorized {mode_str} environments...")
     vec_env = make_vec_env(
         arm=arm,
         config=env_config,
         n_envs=training_config['n_envs'],
         seed=training_config['seed'],
         enable_telemetry=False,  # Disable telemetry during training for speed
+        multi_community=multi_community,
     )
 
     # Wrap with VecNormalize (for reward normalization)
@@ -300,7 +325,7 @@ def train(
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='Train PPO agent for Phase 4')
+    parser = argparse.ArgumentParser(description='Train PPO agent for Phase 4 & 5')
 
     parser.add_argument('--arm', type=str, required=True, choices=['treatment', 'control'],
                         help='Training arm: treatment or control')
@@ -314,6 +339,8 @@ def main():
                         help='Number of parallel environments (overrides config)')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed (overrides config)')
+    parser.add_argument('--multi-community', action='store_true',
+                        help='Enable multi-community mode (Phase 5)')
     parser.add_argument('--verbose', type=int, default=1,
                         help='Verbosity level (0=none, 1=info, 2=debug)')
 
@@ -336,6 +363,7 @@ def main():
         config=config,
         output_dir=args.output_dir,
         verbose=args.verbose,
+        multi_community=args.multi_community,
     )
 
 
