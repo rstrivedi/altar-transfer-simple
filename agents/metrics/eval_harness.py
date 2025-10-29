@@ -66,8 +66,8 @@ from agents.envs.resident_wrapper import ResidentWrapper
 from agents.residents.info_extractor import ResidentInfoExtractor
 from agents.residents.scripted_residents import ResidentController
 from agents.metrics.recorder import MetricsRecorder
-from agents.metrics.aggregators import compute_episode_metrics
-from agents.metrics.schema import EpisodeMetrics, RunMetrics, aggregate_run_metrics
+from agents.metrics.aggregators import compute_episode_metrics, aggregate_distributional_metrics
+from agents.metrics.schema import EpisodeMetrics, RunMetrics, aggregate_run_metrics, DistributionalRunMetrics
 from agents.metrics.video import render_episode_with_overlays, save_video
 
 
@@ -472,3 +472,236 @@ def run_evaluation_from_checkpoint(
       video_episodes=video_episodes,
       video_output_dir=video_output_dir,
   )
+
+
+def run_distributional_evaluation(
+    ego_policy: Callable,
+    config: Optional[Dict] = None,
+    num_episodes_per_community: int = 20,
+    seed: int = 42,
+    video_episodes: Optional[Dict[str, List[int]]] = None,
+    video_output_dir: str = "./eval_videos_multi",
+) -> Dict[str, DistributionalRunMetrics]:
+  """Run distributional evaluation across RED, GREEN, BLUE communities (Phase 5).
+
+  Evaluates policy performance across mixture distribution μ = {RED, GREEN, BLUE}.
+  Runs baseline + treatment + control for each community, then aggregates.
+
+  Args:
+    ego_policy: Function mapping observation → action for ego.
+    config: Base config (permitted_color_index will be overridden per community).
+      If None, uses default config.
+    num_episodes_per_community: Episodes per community (total = 3x this).
+    seed: Single seed for entire experiment (episode seeds derived from this).
+    video_episodes: Dict mapping community ('RED'/'GREEN'/'BLUE') to episode indices.
+      Example: {'RED': [0, 1], 'GREEN': [0]} renders RED eps 0-1, GREEN ep 0.
+      If None, no videos are rendered.
+    video_output_dir: Base directory for videos (organized by community subdirs).
+
+  Returns:
+    Dict with keys 'baseline', 'treatment', 'control', each containing
+    DistributionalRunMetrics with per-color and aggregate metrics.
+
+  Example:
+    results = run_distributional_evaluation(
+        ego_policy=my_policy,
+        config=config,
+        num_episodes_per_community=20,  # 60 total episodes (20 per color)
+        seed=42,
+        video_episodes={'RED': [0, 1], 'GREEN': [0], 'BLUE': [0]},
+    )
+
+    # Access distributional metrics
+    treatment = results['treatment']
+    print(f"Average ΔV: {treatment.avg_value_gap:.2f}")
+    print(f"Worst ΔV: {treatment.worst_value_gap:.2f} ({treatment.worst_community})")
+    print(f"RED ΔV: {treatment.red_metrics.value_gap_mean:.2f}")
+  """
+  from pathlib import Path
+
+  # === Setup config ===
+  if config is None:
+    config = _get_default_eval_config()
+
+  # === Generate episode seeds from base seed ===
+  rng = np.random.RandomState(seed)
+  total_episodes = 3 * num_episodes_per_community
+  all_seeds = rng.randint(0, 1000000, size=total_episodes).tolist()
+
+  # Split seeds by community
+  red_seeds = all_seeds[0:num_episodes_per_community]
+  green_seeds = all_seeds[num_episodes_per_community:2*num_episodes_per_community]
+  blue_seeds = all_seeds[2*num_episodes_per_community:3*num_episodes_per_community]
+
+  communities = [
+      (1, 'RED', red_seeds),
+      (2, 'GREEN', green_seeds),
+      (3, 'BLUE', blue_seeds),
+  ]
+
+  # === Collect episodes across all communities ===
+  all_baseline_episodes = []
+  all_treatment_episodes = []
+  all_control_episodes = []
+
+  for community_idx, community_name, community_seeds in communities:
+    print(f"\n{'='*80}")
+    print(f"COMMUNITY: {community_name} (permitted_color_index={community_idx})")
+    print(f"{'='*80}")
+
+    # Create community-specific config
+    community_config = config.copy()
+    community_config['permitted_color_index'] = community_idx
+
+    # === Run baseline for this community ===
+    print(f"\n=== Running BASELINE for {community_name}: {num_episodes_per_community} episodes ===")
+    baseline_eps = _run_baseline_episodes(
+        config=community_config,
+        num_episodes=num_episodes_per_community,
+        seeds=community_seeds,
+    )
+
+    # Tag with community
+    for ep in baseline_eps:
+      ep.community_tag = community_name
+      ep.community_idx = community_idx
+
+    # Extract baseline metrics for value-gap/sanction-regret
+    baseline_r_evals = [ep.r_eval for ep in baseline_eps]
+    baseline_sanctions = [ep.num_minus10_received for ep in baseline_eps]
+
+    # === Run treatment for this community ===
+    print(f"\n=== Running TREATMENT for {community_name}: {num_episodes_per_community} episodes ===")
+    video_eps_treatment = video_episodes.get(community_name) if video_episodes else None
+    video_dir_treatment = f"{video_output_dir}/{community_name}/treatment" if video_eps_treatment else None
+
+    treatment_eps = _run_ego_episodes(
+        ego_policy=ego_policy,
+        config=community_config,
+        arm='treatment',
+        enable_treatment=True,
+        num_episodes=num_episodes_per_community,
+        seeds=community_seeds,
+        baseline_r_evals=baseline_r_evals,
+        baseline_sanctions=baseline_sanctions,
+        video_episodes=video_eps_treatment,
+        video_output_dir=video_dir_treatment,
+    )
+
+    # Tag with community
+    for ep in treatment_eps:
+      ep.community_tag = community_name
+      ep.community_idx = community_idx
+
+    # === Run control for this community ===
+    print(f"\n=== Running CONTROL for {community_name}: {num_episodes_per_community} episodes ===")
+    video_eps_control = video_episodes.get(community_name) if video_episodes else None
+    video_dir_control = f"{video_output_dir}/{community_name}/control" if video_eps_control else None
+
+    control_eps = _run_ego_episodes(
+        ego_policy=ego_policy,
+        config=community_config,
+        arm='control',
+        enable_treatment=False,
+        num_episodes=num_episodes_per_community,
+        seeds=community_seeds,
+        baseline_r_evals=baseline_r_evals,
+        baseline_sanctions=baseline_sanctions,
+        video_episodes=video_eps_control,
+        video_output_dir=video_dir_control,
+    )
+
+    # Tag with community
+    for ep in control_eps:
+      ep.community_tag = community_name
+      ep.community_idx = community_idx
+
+    # Collect episodes
+    all_baseline_episodes.extend(baseline_eps)
+    all_treatment_episodes.extend(treatment_eps)
+    all_control_episodes.extend(control_eps)
+
+  # === Aggregate distributional metrics ===
+  print(f"\n{'='*80}")
+  print("AGGREGATING DISTRIBUTIONAL METRICS")
+  print(f"{'='*80}")
+
+  baseline_dist = aggregate_distributional_metrics(all_baseline_episodes, 'baseline', config)
+  treatment_dist = aggregate_distributional_metrics(all_treatment_episodes, 'treatment', config)
+  control_dist = aggregate_distributional_metrics(all_control_episodes, 'control', config)
+
+  # === Print summary ===
+  _print_distributional_summary(baseline_dist, treatment_dist, control_dist)
+
+  return {
+      'baseline': baseline_dist,
+      'treatment': treatment_dist,
+      'control': control_dist,
+  }
+
+
+def _print_distributional_summary(
+    baseline: DistributionalRunMetrics,
+    treatment: DistributionalRunMetrics,
+    control: DistributionalRunMetrics,
+):
+  """Print distributional evaluation summary."""
+  print("\n" + "="*80)
+  print("DISTRIBUTIONAL EVALUATION SUMMARY")
+  print("="*80)
+
+  # Per-community breakdown
+  for community_name in ['RED', 'GREEN', 'BLUE']:
+    print(f"\n{'='*80}")
+    print(f"COMMUNITY: {community_name}")
+    print(f"{'='*80}")
+
+    # Get community metrics
+    baseline_comm = getattr(baseline, f'{community_name.lower()}_metrics')
+    treatment_comm = getattr(treatment, f'{community_name.lower()}_metrics')
+    control_comm = getattr(control, f'{community_name.lower()}_metrics')
+
+    if baseline_comm:
+      print(f"\n  BASELINE:")
+      print(f"    R_eval: {baseline_comm.r_eval_mean:.2f} ± {baseline_comm.r_eval_std:.2f}")
+
+    if treatment_comm:
+      print(f"\n  TREATMENT:")
+      print(f"    R_eval: {treatment_comm.r_eval_mean:.2f} ± {treatment_comm.r_eval_std:.2f}")
+      print(f"    ΔV: {treatment_comm.value_gap_mean:.2f} ± {treatment_comm.value_gap_std:.2f}")
+      print(f"    SR: {treatment_comm.sanction_regret_mean:.2f} ± {treatment_comm.sanction_regret_std:.2f}")
+      print(f"    Compliance: {treatment_comm.compliance_pct_mean:.1f}%")
+
+    if control_comm:
+      print(f"\n  CONTROL:")
+      print(f"    R_eval: {control_comm.r_eval_mean:.2f} ± {control_comm.r_eval_std:.2f}")
+      print(f"    ΔV: {control_comm.value_gap_mean:.2f} ± {control_comm.value_gap_std:.2f}")
+      print(f"    SR: {control_comm.sanction_regret_mean:.2f} ± {control_comm.sanction_regret_std:.2f}")
+      print(f"    Compliance: {control_comm.compliance_pct_mean:.1f}%")
+
+  # Aggregate metrics
+  print(f"\n{'='*80}")
+  print("AGGREGATE METRICS (across all communities)")
+  print(f"{'='*80}")
+
+  print(f"\nTREATMENT:")
+  print(f"  Average ΔV: {treatment.avg_value_gap:.2f}")
+  print(f"  Worst ΔV: {treatment.worst_value_gap:.2f} ({treatment.worst_community})")
+  print(f"  Best ΔV: {treatment.best_value_gap:.2f} ({treatment.best_community})")
+  print(f"  Average Compliance: {treatment.avg_compliance_pct:.1f}%")
+
+  print(f"\nCONTROL:")
+  print(f"  Average ΔV: {control.avg_value_gap:.2f}")
+  print(f"  Worst ΔV: {control.worst_value_gap:.2f} ({control.worst_community})")
+  print(f"  Best ΔV: {control.best_value_gap:.2f} ({control.best_community})")
+  print(f"  Average Compliance: {control.avg_compliance_pct:.1f}%")
+
+  # Balance check
+  print(f"\nBALANCE CHECK (1:1:1 ratio verification):")
+  print(f"  RED: {treatment.num_red_episodes} episodes")
+  print(f"  GREEN: {treatment.num_green_episodes} episodes")
+  print(f"  BLUE: {treatment.num_blue_episodes} episodes")
+  print(f"  Ratio range: [{treatment.min_ratio:.3f}, {treatment.max_ratio:.3f}]")
+  print(f"  (1.0 = perfect balance)")
+
+  print("\n" + "="*80)
