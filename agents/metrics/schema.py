@@ -97,6 +97,10 @@ class StepMetrics:
   permitted_color_index: int  # 1=RED, 2=GREEN, 3=BLUE
   berry_counts: Tuple[int, int, int]  # (red, green, blue) from BERRIES_BY_TYPE observation
 
+  # === Phase 5: Multi-community tracking ===
+  community_tag: Optional[str] = None  # 'RED', 'GREEN', or 'BLUE' (if multi_community_mode)
+  community_idx: Optional[int] = None  # 1, 2, or 3 (if multi_community_mode)
+
 
 @dataclass
 class EpisodeMetrics:
@@ -109,6 +113,10 @@ class EpisodeMetrics:
   episode_len: int  # Number of steps
   seed: int  # RNG seed for reproducibility
   arm: str  # 'control' or 'treatment'
+
+  # === Phase 5: Multi-community tracking ===
+  community_tag: Optional[str] = None  # 'RED', 'GREEN', or 'BLUE' (if multi_community_mode)
+  community_idx: Optional[int] = None  # 1, 2, or 3 (if multi_community_mode)
 
   # === Ego return components ===
   r_env_sum: float  # Σ r_env over episode
@@ -226,6 +234,63 @@ class RunMetrics:
   alpha_sum_mean: float = 0.0
   beta_sum_mean: float = 0.0
   c_sum_mean: float = 0.0
+
+
+@dataclass
+class DistributionalRunMetrics:
+  """Aggregated metrics across multiple communities for distributional competence (Phase 5).
+
+  Evaluates policy performance across mixture distribution μ = {RED, GREEN, BLUE}.
+
+  Key metrics:
+    - Average performance: E_θ~μ[ΔV], E_θ~μ[SR]
+    - Worst-case performance: max_θ(ΔV), max_θ(SR)
+    - Per-color breakdown: {RED, GREEN, BLUE} × {ΔV, SR, compliance%}
+  """
+  # === Run metadata ===
+  arm: str  # 'control' or 'treatment'
+  num_episodes: int  # Total episodes across all communities
+  seeds: List[int]  # Seeds used for reproducibility
+
+  # === Config (logged for reproducibility) ===
+  startup_grey_grace: int
+  immunity_cooldown: int
+  c_value: float
+  beta_value: float
+  alpha_value: float
+
+  # === Per-community metrics ===
+  # Each contains RunMetrics for that specific community
+  red_metrics: Optional[RunMetrics] = None
+  green_metrics: Optional[RunMetrics] = None
+  blue_metrics: Optional[RunMetrics] = None
+
+  # === Distributional metrics (aggregate) ===
+  # Average across communities
+  avg_value_gap: float = 0.0  # E_θ~μ[ΔV]
+  avg_sanction_regret: float = 0.0  # E_θ~μ[SR]
+  avg_compliance_pct: float = 0.0  # E_θ~μ[compliance%]
+  avg_r_eval: float = 0.0  # E_θ~μ[R_eval]
+
+  # Worst-case across communities
+  worst_value_gap: float = 0.0  # max_θ(ΔV_mean)
+  worst_sanction_regret: float = 0.0  # max_θ(SR_mean)
+  worst_community: str = ""  # Which community is worst
+
+  # Best-case across communities (for comparison)
+  best_value_gap: float = 0.0  # min_θ(ΔV_mean)
+  best_sanction_regret: float = 0.0  # min_θ(SR_mean)
+  best_community: str = ""  # Which community is best
+
+  # === Per-community episode counts ===
+  num_red_episodes: int = 0
+  num_green_episodes: int = 0
+  num_blue_episodes: int = 0
+
+  # === Balance check ===
+  # How close to 1:1:1 ratio? (for verification)
+  min_ratio: float = 0.0  # min(num_red, num_green, num_blue) / (total/3)
+  max_ratio: float = 0.0  # max(num_red, num_green, num_blue) / (total/3)
 
 
 # === Helper functions for creating metrics ===
