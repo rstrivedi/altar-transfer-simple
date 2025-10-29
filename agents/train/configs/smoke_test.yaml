@@ -1,0 +1,69 @@
+# Added by RST: Smoke test configuration for Phase 4
+# Quick training run for testing (small timesteps, fewer envs)
+
+# Environment configuration
+env:
+  permitted_color_index: 1
+  startup_grey_grace: 25
+  episode_timesteps: 2000
+  altar_coords: [5, 15]
+  alpha: 0.5
+  beta: 0.5
+  c: 0.2
+  immunity_cooldown: 200
+
+# Training hyperparameters (REDUCED for smoke test)
+training:
+  total_timesteps: 100000  # Only 100k steps for quick test
+  n_envs: 4  # Fewer envs for faster startup
+  seed: 42
+  learning_rate: 0.0003
+  n_steps: 256
+  batch_size: 1024  # Smaller batch for fewer envs
+  n_epochs: 10
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: null
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  use_sde: false
+  sde_sample_freq: -1
+
+# Policy architecture
+policy:
+  trunk_dim: 256
+  sanction_hidden_dim: 128
+  ent_coef_game: 0.01
+  ent_coef_sanction: 0.02
+  recurrent: false
+  lstm_hidden_size: 256
+
+# VecNormalize configuration
+vec_normalize:
+  norm_obs: false
+  norm_reward: true
+  clip_obs: 10.0
+  clip_reward: 10.0
+  gamma: 0.995
+
+# Logging configuration
+logging:
+  wandb_project: altar-transfer
+  wandb_entity: null
+  wandb_run_name: smoke_test
+  tensorboard_log: ./logs/tensorboard
+  log_interval: 1  # Log every step for debugging
+
+# Checkpointing configuration
+checkpointing:
+  save_freq: 25000  # Save every 25k steps
+  checkpoint_dir: ./checkpoints/smoke_test
+  save_vec_normalize: true
+
+# Evaluation configuration
+evaluation:
+  eval_freq: 50000  # Eval at 50k steps
+  n_eval_episodes: 5  # Fewer episodes for quick eval
+  eval_seeds: [42, 43, 44, 45, 46]  # Fixed seeds

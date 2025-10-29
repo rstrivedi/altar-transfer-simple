@@ -1,0 +1,72 @@
+# Added by RST: Control arm configuration for Phase 4
+# Training configuration for control arm (without PERMITTED_COLOR observation)
+
+# Environment configuration
+env:
+  permitted_color_index: 1  # Same as treatment (for A/B parity)
+  startup_grey_grace: 25
+  episode_timesteps: 2000
+  altar_coords: [5, 15]  # Not used in control (no altar rendering)
+  alpha: 0.5  # Train-time bonus for correct zaps (same as treatment)
+  beta: 0.5   # Mis-zap penalty (same as treatment)
+  c: 0.2      # Zap effort cost (same as treatment)
+  immunity_cooldown: 200
+
+# Training hyperparameters (PPO)
+# IDENTICAL to treatment for A/B parity
+training:
+  total_timesteps: 5000000
+  n_envs: 16
+  seed: 42
+  learning_rate: 0.0003
+  n_steps: 256
+  batch_size: 2048
+  n_epochs: 10
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: null
+  ent_coef: 0.01  # Default (overridden by head-wise coefficients)
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  use_sde: false
+  sde_sample_freq: -1
+
+# Policy architecture
+# IDENTICAL to treatment (architectural parity)
+policy:
+  trunk_dim: 256
+  sanction_hidden_dim: 128
+  ent_coef_game: 0.01      # Same as treatment
+  ent_coef_sanction: 0.02  # Same as treatment
+  recurrent: false         # Set to true for LSTM variant
+  lstm_hidden_size: 256
+
+# VecNormalize configuration
+# IDENTICAL to treatment
+vec_normalize:
+  norm_obs: false    # Don't normalize RGB observations
+  norm_reward: true  # Normalize rewards for stable training
+  clip_obs: 10.0
+  clip_reward: 10.0
+  gamma: 0.995
+
+# Logging configuration
+logging:
+  wandb_project: altar-transfer
+  wandb_entity: null  # Set to your W&B entity if needed
+  wandb_run_name: null  # Auto-generated if null
+  tensorboard_log: ./logs/tensorboard
+  log_interval: 10
+
+# Checkpointing configuration
+checkpointing:
+  save_freq: 50000  # Save checkpoint every 50k steps
+  checkpoint_dir: ./checkpoints/control  # Different checkpoint dir
+  save_vec_normalize: true
+
+# Evaluation configuration
+evaluation:
+  eval_freq: 100000  # Evaluate every 100k steps
+  n_eval_episodes: 20
+  eval_seeds: null  # Will generate if null (use fixed seeds for reproducibility)
