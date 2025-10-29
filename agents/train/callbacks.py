@@ -27,6 +27,10 @@ import torch
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecNormalize
 
+# Edited by RST: Import distributional evaluation for Phase 5
+from agents.metrics.eval_harness import run_evaluation, run_distributional_evaluation
+from agents.metrics.schema import DistributionalRunMetrics
+
 
 class WandbLoggingCallback(BaseCallback):
     """Callback for logging training metrics to Weights & Biases.
@@ -50,6 +54,7 @@ class WandbLoggingCallback(BaseCallback):
         self,
         config: Dict,
         arm: str,
+        multi_community: bool = False,  # Edited by RST: Phase 5 flag
         project: str = 'altar-transfer',
         entity: Optional[str] = None,
         run_name: Optional[str] = None,
@@ -59,10 +64,13 @@ class WandbLoggingCallback(BaseCallback):
         super().__init__(verbose)
         self.config = config
         self.arm = arm
+        self.multi_community = multi_community  # Edited by RST: Track Phase 5 mode
         self.project = project
         self.entity = entity
-        self.run_name = run_name or f'phase4_{arm}'
-        self.tags = tags or [f'phase4', arm]
+        # Edited by RST: Update run name and tags for Phase 5
+        phase = 5 if multi_community else 4
+        self.run_name = run_name or f'phase{phase}_{arm}{"_multi" if multi_community else ""}'
+        self.tags = tags or [f'phase{phase}', arm] + (['multi-community'] if multi_community else [])
         self.wandb_run = None
 
     def _init_callback(self) -> None:
@@ -79,9 +87,12 @@ class WandbLoggingCallback(BaseCallback):
                 return
 
             # Build wandb config
+            # Edited by RST: Update phase based on multi_community mode
+            phase = 5 if self.multi_community else 4
             wandb_config = {
                 'arm': self.arm,
-                'phase': 4,
+                'phase': phase,
+                'multi_community': self.multi_community,
                 **self.config,
             }
 
@@ -219,6 +230,7 @@ class EvalCallback(BaseCallback):
         eval_freq: int,
         config: Dict,
         arm: str,
+        multi_community: bool = False,  # Edited by RST: Phase 5 flag
         n_eval_episodes: int = 20,
         eval_seeds: Optional[list] = None,
         checkpoint_dir: str = './checkpoints',
@@ -228,6 +240,7 @@ class EvalCallback(BaseCallback):
         self.eval_freq = eval_freq
         self.config = config
         self.arm = arm
+        self.multi_community = multi_community  # Edited by RST: Track Phase 5 mode
         self.n_eval_episodes = n_eval_episodes
         self.eval_seeds = eval_seeds
         self.checkpoint_dir = checkpoint_dir
@@ -235,12 +248,17 @@ class EvalCallback(BaseCallback):
         # Generate eval seeds if not provided
         if self.eval_seeds is None:
             rng = np.random.RandomState(12345)
-            self.eval_seeds = rng.randint(0, 1_000_000, size=n_eval_episodes).tolist()
+            # Edited by RST: Phase 5 needs 3x episodes (one per community)
+            n_seeds = n_eval_episodes * 3 if multi_community else n_eval_episodes
+            self.eval_seeds = rng.randint(0, 1_000_000, size=n_seeds).tolist()
 
     def _init_callback(self) -> None:
         """Initialize callback."""
         if self.verbose > 0:
-            print(f"Evaluation will run every {self.eval_freq} steps with {self.n_eval_episodes} episodes")
+            # Edited by RST: Update message for Phase 5
+            mode = "Phase 5 (distributional)" if self.multi_community else "Phase 4"
+            episodes_desc = f"{self.n_eval_episodes} episodes per community" if self.multi_community else f"{self.n_eval_episodes} episodes"
+            print(f"{mode} evaluation will run every {self.eval_freq} steps with {episodes_desc}")
 
     def _on_step(self) -> bool:
         """Called at each training step.
@@ -252,7 +270,8 @@ class EvalCallback(BaseCallback):
         if self.n_calls % self.eval_freq == 0:
             if self.verbose > 0:
                 print(f"\n{'='*80}")
-                print(f"Running evaluation at step {self.num_timesteps}...")
+                mode = "Phase 5 Distributional" if self.multi_community else "Phase 4"
+                print(f"Running {mode} evaluation at step {self.num_timesteps}...")
                 print(f"{'='*80}\n")
 
             # Save checkpoint for evaluation
@@ -262,18 +281,169 @@ class EvalCallback(BaseCallback):
             )
             self.model.save(checkpoint_path)
 
-            # TODO: Load checkpoint and run Phase 3 eval_harness
-            # This requires:
-            # 1. Policy loader function that loads SB3 checkpoint
-            # 2. Calling run_evaluation_from_checkpoint from Phase 3
-            # 3. Logging results to W&B
+            # Save VecNormalize stats if present
+            vec_normalize_path = None
+            if isinstance(self.model.env, VecNormalize):
+                vec_normalize_path = os.path.join(
+                    self.checkpoint_dir,
+                    f'vec_normalize_eval_step_{self.num_timesteps}.pkl'
+                )
+                self.model.env.save(vec_normalize_path)
+
+            # Edited by RST: Implement Phase 4/5 evaluation integration
+            try:
+                # Create policy wrapper for eval harness
+                def policy_fn(obs):
+                    """Policy wrapper for eval harness."""
+                    # Get action from policy (deterministic for evaluation)
+                    action, _ = self.model.predict(obs, deterministic=True)
+                    return action
+
+                # Run evaluation based on mode
+                if self.multi_community:
+                    # Phase 5: Distributional evaluation across RED/GREEN/BLUE
+                    results = run_distributional_evaluation(
+                        ego_policy=policy_fn,
+                        config=self.config,
+                        num_episodes_per_community=self.n_eval_episodes,
+                        seed=self.eval_seeds[0] if isinstance(self.eval_seeds, list) else 12345,
+                    )
+
+                    # Extract metrics
+                    baseline_dist = results['baseline']
+                    treatment_dist = results.get('treatment')
+                    control_dist = results.get('control')
+
+                    # Get the trained arm metrics
+                    ego_dist = treatment_dist if self.arm == 'treatment' else control_dist
+
+                    # Log to W&B
+                    self._log_distributional_metrics(ego_dist, baseline_dist)
+
+                else:
+                    # Phase 4: Single-community evaluation
+                    results = run_evaluation(
+                        ego_policy=policy_fn,
+                        config=self.config,
+                        num_episodes=self.n_eval_episodes,
+                        seeds=self.eval_seeds,
+                    )
+
+                    # Log to W&B
+                    self._log_single_community_metrics(results)
+
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"Evaluation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
 
             if self.verbose > 0:
-                print(f"Evaluation checkpoint saved to {checkpoint_path}")
-                print("TODO: Integrate with Phase 3 eval_harness")
                 print(f"{'='*80}\n")
 
         return True
+
+    def _log_distributional_metrics(
+        self,
+        ego_dist: DistributionalRunMetrics,
+        baseline_dist: DistributionalRunMetrics,
+    ):
+        """Log Phase 5 distributional metrics to W&B.
+
+        Added by RST: Phase 5 per-color and distributional logging.
+        """
+        try:
+            import wandb
+
+            if wandb.run is None:
+                return
+
+            # === Per-community metrics ===
+            for color in ['red', 'green', 'blue']:
+                ego_metrics = getattr(ego_dist, f'{color}_metrics')
+                baseline_metrics = getattr(baseline_dist, f'{color}_metrics')
+
+                if ego_metrics is None or baseline_metrics is None:
+                    continue
+
+                color_upper = color.upper()
+                wandb.log({
+                    f'eval/{color}/value_gap_mean': ego_metrics.value_gap_mean,
+                    f'eval/{color}/value_gap_median': ego_metrics.value_gap_median,
+                    f'eval/{color}/value_gap_std': ego_metrics.value_gap_std,
+                    f'eval/{color}/sanction_regret_mean': ego_metrics.sanction_regret_mean,
+                    f'eval/{color}/sanction_regret_median': ego_metrics.sanction_regret_median,
+                    f'eval/{color}/correct_sanction_rate': ego_metrics.correct_sanction_rate,
+                    f'eval/{color}/violation_rate': ego_metrics.violation_rate,
+                    f'eval/{color}/immunity_rate': ego_metrics.immunity_rate,
+                    f'eval/{color}/baseline_value_gap': baseline_metrics.value_gap_mean,
+                    f'eval/{color}/baseline_sanction_regret': baseline_metrics.sanction_regret_mean,
+                }, step=self.num_timesteps)
+
+            # === Distributional summary metrics ===
+            wandb.log({
+                'eval/dist/avg_value_gap': ego_dist.avg_value_gap,
+                'eval/dist/avg_sanction_regret': ego_dist.avg_sanction_regret,
+                'eval/dist/worst_value_gap': ego_dist.worst_value_gap,
+                'eval/dist/worst_community': ego_dist.worst_community,
+                'eval/dist/best_value_gap': ego_dist.best_value_gap,
+                'eval/dist/best_community': ego_dist.best_community,
+                'eval/dist/balance_check': ego_dist.balance_check_ratio,
+                'eval/dist/baseline_avg_value_gap': baseline_dist.avg_value_gap,
+                'eval/dist/baseline_worst_value_gap': baseline_dist.worst_value_gap,
+            }, step=self.num_timesteps)
+
+            if self.verbose > 0:
+                print(f"\n=== Phase 5 Distributional Evaluation Results ===")
+                print(f"Average ΔV: {ego_dist.avg_value_gap:.3f}")
+                print(f"Worst ΔV: {ego_dist.worst_value_gap:.3f} ({ego_dist.worst_community})")
+                print(f"Best ΔV: {ego_dist.best_value_gap:.3f} ({ego_dist.best_community})")
+                print(f"Balance check: {ego_dist.balance_check_ratio:.3f}")
+
+        except ImportError:
+            pass  # W&B not available
+
+    def _log_single_community_metrics(self, results: Dict):
+        """Log Phase 4 single-community metrics to W&B.
+
+        Added by RST: Phase 4 single-community logging.
+        """
+        try:
+            import wandb
+
+            if wandb.run is None:
+                return
+
+            # Extract metrics from results dict
+            baseline_metrics = results.get('baseline')
+            ego_metrics = results.get('treatment' if self.arm == 'treatment' else 'control')
+
+            if ego_metrics is None:
+                return
+
+            # Log main metrics
+            wandb.log({
+                'eval/value_gap_mean': ego_metrics.value_gap_mean,
+                'eval/value_gap_median': ego_metrics.value_gap_median,
+                'eval/sanction_regret_mean': ego_metrics.sanction_regret_mean,
+                'eval/correct_sanction_rate': ego_metrics.correct_sanction_rate,
+                'eval/violation_rate': ego_metrics.violation_rate,
+            }, step=self.num_timesteps)
+
+            if baseline_metrics is not None:
+                wandb.log({
+                    'eval/baseline_value_gap': baseline_metrics.value_gap_mean,
+                    'eval/baseline_sanction_regret': baseline_metrics.sanction_regret_mean,
+                }, step=self.num_timesteps)
+
+            if self.verbose > 0:
+                print(f"\n=== Phase 4 Evaluation Results ===")
+                print(f"Value Gap: {ego_metrics.value_gap_mean:.3f}")
+                print(f"Sanction Regret: {ego_metrics.sanction_regret_mean:.3f}")
+                print(f"Correct Sanction Rate: {ego_metrics.correct_sanction_rate:.2%}")
+
+        except ImportError:
+            pass  # W&B not available
 
 
 # Helper function for creating callback list
@@ -281,18 +451,20 @@ class EvalCallback(BaseCallback):
 def create_callbacks(
     config: Dict,
     arm: str,
+    multi_community: bool = False,  # Edited by RST: Phase 5 flag
     enable_wandb: bool = True,
     enable_checkpointing: bool = True,
-    enable_eval: bool = False,  # Disabled by default (TODO: implement eval integration)
+    enable_eval: bool = False,
 ) -> list:
-    """Create list of callbacks for training.
+    """Create list of callbacks for training (Phase 4 or Phase 5).
 
     Args:
         config: Configuration dict
         arm: 'treatment' or 'control'
+        multi_community: Whether to use Phase 5 multi-community mode
         enable_wandb: Whether to enable W&B logging
         enable_checkpointing: Whether to enable checkpointing
-        enable_eval: Whether to enable periodic evaluation (TODO)
+        enable_eval: Whether to enable periodic evaluation
 
     Returns:
         List of callback instances
@@ -304,6 +476,7 @@ def create_callbacks(
         wandb_callback = WandbLoggingCallback(
             config=config,
             arm=arm,
+            multi_community=multi_community,  # Edited by RST: Pass Phase 5 flag
             project=config.get('logging', {}).get('wandb_project', 'altar-transfer'),
             entity=config.get('logging', {}).get('wandb_entity'),
             run_name=config.get('logging', {}).get('wandb_run_name'),
@@ -320,12 +493,13 @@ def create_callbacks(
         )
         callbacks.append(checkpoint_callback)
 
-    # Evaluation (TODO: implement Phase 3 integration)
+    # Evaluation
     if enable_eval:
         eval_callback = EvalCallback(
             eval_freq=config.get('evaluation', {}).get('eval_freq', 100_000),
             config=config.get('env', {}),
             arm=arm,
+            multi_community=multi_community,  # Edited by RST: Pass Phase 5 flag
             n_eval_episodes=config.get('evaluation', {}).get('n_eval_episodes', 20),
             eval_seeds=config.get('evaluation', {}).get('eval_seeds'),
         )
