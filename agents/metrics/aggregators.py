@@ -346,6 +346,10 @@ def compute_episode_metrics(
   episode_len = len(step_metrics)
   permitted_color_index = step_metrics[0].permitted_color_index
 
+  # === Phase 5: Extract community tags if present ===
+  community_tag = step_metrics[0].community_tag
+  community_idx = step_metrics[0].community_idx
+
   # === Compute return components ===
   r_env_sum = sum(step.r_env for step in step_metrics)
   alpha_sum = sum(step.alpha for step in step_metrics)
@@ -392,6 +396,8 @@ def compute_episode_metrics(
       episode_len=episode_len,
       seed=seed,
       arm=arm,
+      community_tag=community_tag,
+      community_idx=community_idx,
 
       # Return components
       r_env_sum=r_env_sum,
@@ -432,4 +438,135 @@ def compute_episode_metrics(
       # SUPPORTING: Collective cost
       collective_costs_per_sanction=collective_costs,
       mean_collective_cost=mean_collective_cost,
+  )
+
+
+def aggregate_distributional_metrics(
+    episodes: List[EpisodeMetrics],
+    arm: str,
+    config: dict,
+) -> 'DistributionalRunMetrics':
+  """Aggregate episodes across multiple communities for distributional competence (Phase 5).
+
+  Groups episodes by community_tag (RED/GREEN/BLUE) and computes per-color and aggregate metrics.
+
+  Args:
+    episodes: List of EpisodeMetrics from multi-community training/eval.
+    arm: 'control' or 'treatment'
+    config: Config dict with startup_grey_grace, immunity_cooldown, c, beta, alpha, etc.
+
+  Returns:
+    DistributionalRunMetrics with per-color and aggregate metrics.
+  """
+  from agents.metrics.schema import DistributionalRunMetrics, aggregate_run_metrics
+
+  if not episodes:
+    raise ValueError("Cannot aggregate empty episode list")
+
+  # Group episodes by community
+  red_episodes = [ep for ep in episodes if ep.community_tag == 'RED']
+  green_episodes = [ep for ep in episodes if ep.community_tag == 'GREEN']
+  blue_episodes = [ep for ep in episodes if ep.community_tag == 'BLUE']
+
+  # Compute per-community RunMetrics
+  red_metrics = None
+  green_metrics = None
+  blue_metrics = None
+
+  if red_episodes:
+    red_metrics = aggregate_run_metrics(red_episodes, arm, {**config, 'permitted_color_index': 1})
+
+  if green_episodes:
+    green_metrics = aggregate_run_metrics(green_episodes, arm, {**config, 'permitted_color_index': 2})
+
+  if blue_episodes:
+    blue_metrics = aggregate_run_metrics(blue_episodes, arm, {**config, 'permitted_color_index': 3})
+
+  # Compute distributional metrics (average and worst-case)
+  community_metrics = []
+  community_names = []
+
+  if red_metrics:
+    community_metrics.append(red_metrics)
+    community_names.append('RED')
+  if green_metrics:
+    community_metrics.append(green_metrics)
+    community_names.append('GREEN')
+  if blue_metrics:
+    community_metrics.append(blue_metrics)
+    community_names.append('BLUE')
+
+  if not community_metrics:
+    raise ValueError("No valid community metrics computed")
+
+  # Average across communities
+  avg_value_gap = np.mean([m.value_gap_mean for m in community_metrics])
+  avg_sanction_regret = np.mean([m.sanction_regret_mean for m in community_metrics])
+  avg_compliance_pct = np.mean([m.compliance_pct_mean for m in community_metrics])
+  avg_r_eval = np.mean([m.r_eval_mean for m in community_metrics])
+
+  # Worst-case (max value_gap, max sanction_regret)
+  worst_idx = np.argmax([m.value_gap_mean for m in community_metrics])
+  worst_value_gap = community_metrics[worst_idx].value_gap_mean
+  worst_sanction_regret = community_metrics[worst_idx].sanction_regret_mean
+  worst_community = community_names[worst_idx]
+
+  # Best-case (min value_gap, min sanction_regret)
+  best_idx = np.argmin([m.value_gap_mean for m in community_metrics])
+  best_value_gap = community_metrics[best_idx].value_gap_mean
+  best_sanction_regret = community_metrics[best_idx].sanction_regret_mean
+  best_community = community_names[best_idx]
+
+  # Balance check
+  num_red = len(red_episodes)
+  num_green = len(green_episodes)
+  num_blue = len(blue_episodes)
+  total_episodes = len(episodes)
+  expected_per_community = total_episodes / 3.0
+
+  min_ratio = min(num_red, num_green, num_blue) / expected_per_community if expected_per_community > 0 else 0.0
+  max_ratio = max(num_red, num_green, num_blue) / expected_per_community if expected_per_community > 0 else 0.0
+
+  # Collect all seeds
+  all_seeds = [ep.seed for ep in episodes]
+
+  return DistributionalRunMetrics(
+      arm=arm,
+      num_episodes=total_episodes,
+      seeds=all_seeds,
+
+      # Config
+      startup_grey_grace=config.get('startup_grey_grace', 25),
+      immunity_cooldown=config.get('immunity_cooldown', 200),
+      c_value=config.get('c', 0.2),
+      beta_value=config.get('beta', 0.5),
+      alpha_value=config.get('alpha', 0.5),
+
+      # Per-community metrics
+      red_metrics=red_metrics,
+      green_metrics=green_metrics,
+      blue_metrics=blue_metrics,
+
+      # Distributional metrics
+      avg_value_gap=float(avg_value_gap),
+      avg_sanction_regret=float(avg_sanction_regret),
+      avg_compliance_pct=float(avg_compliance_pct),
+      avg_r_eval=float(avg_r_eval),
+
+      worst_value_gap=float(worst_value_gap),
+      worst_sanction_regret=float(worst_sanction_regret),
+      worst_community=worst_community,
+
+      best_value_gap=float(best_value_gap),
+      best_sanction_regret=float(best_sanction_regret),
+      best_community=best_community,
+
+      # Episode counts
+      num_red_episodes=num_red,
+      num_green_episodes=num_green,
+      num_blue_episodes=num_blue,
+
+      # Balance check
+      min_ratio=float(min_ratio),
+      max_ratio=float(max_ratio),
   )
