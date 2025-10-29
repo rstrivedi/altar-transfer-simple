@@ -247,6 +247,8 @@ class AllelopathicHarvestGymEnv(gym.Env):
                     ego_index=self.ego_index,
                     permitted_color_index=self._current_community_idx,
                     startup_grey_grace=self.config.get('startup_grey_grace', 25),
+                    community_tag=self._current_community_name,
+                    community_idx=self._current_community_idx,
                 )
 
         # Reset resident controller

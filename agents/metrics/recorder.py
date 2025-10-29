@@ -41,6 +41,8 @@ class MetricsRecorder:
       ego_index: int,
       permitted_color_index: int,
       startup_grey_grace: int = 25,
+      community_tag: Optional[str] = None,
+      community_idx: Optional[int] = None,
   ):
     """Initialize metrics recorder.
 
@@ -49,11 +51,17 @@ class MetricsRecorder:
       ego_index: Index of ego agent (0-indexed).
       permitted_color_index: Permitted color (1=RED, 2=GREEN, 3=BLUE).
       startup_grey_grace: Grace period for GREY (frames).
+      community_tag: Community name ('RED'/'GREEN'/'BLUE') for Phase 5.
+      community_idx: Community index (1/2/3) for Phase 5.
     """
     self._num_players = num_players
     self._ego_index = ego_index
     self._permitted_color_index = permitted_color_index
     self._startup_grey_grace = startup_grey_grace
+
+    # Phase 5: Multi-community tracking
+    self._community_tag = community_tag
+    self._community_idx = community_idx
 
     # Per-step buffer
     self._step_metrics: List[StepMetrics] = []
@@ -231,6 +239,8 @@ class MetricsRecorder:
         eats=eats,
         permitted_color_index=self._permitted_color_index,
         berry_counts=berry_counts,
+        community_tag=self._community_tag,
+        community_idx=self._community_idx,
     )
 
     self._step_metrics.append(step_metric)
