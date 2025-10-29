@@ -1,4 +1,4 @@
-# Added by RST: Gymnasium wrapper for SB3 PPO training (Phase 4)
+# Added by RST: Gymnasium wrapper for SB3 PPO training (Phase 4 & 5)
 """Gymnasium wrapper for single-ego RL training with scripted residents.
 
 This wrapper:
@@ -8,24 +8,28 @@ This wrapper:
 - Returns rewards: r_train = r_env + alpha - beta - c (alpha for training bonus)
 - Integrates with MetricsRecorder for telemetry capture
 - Supports treatment (with PERMITTED_COLOR) and control (without) arms
+- Supports multi-community mode (Phase 5) for distributional competence training
 
 Usage:
-    # Treatment arm
+    # Phase 4: Single-community training
     env = AllelopathicHarvestGymEnv(
         arm='treatment',
-        config={'permitted_color_index': 1, ...},
+        config={'permitted_color_index': 1, ...},  # Fixed community
         seed=42
     )
 
-    # Control arm
+    # Phase 5: Multi-community training (independent sampling)
     env = AllelopathicHarvestGymEnv(
-        arm='control',
-        config={'permitted_color_index': 1, ...},
-        seed=42
+        arm='treatment',
+        config={'permitted_color_index': 1, ...},  # Ignored, sampled randomly
+        seed=42,
+        multi_community_mode=True  # Samples RED/GREEN/BLUE at each reset
     )
 
-    # Vectorized
-    vec_env = make_vec_env_treatment(num_envs=16, config=config, seeds=seeds)
+    # Vectorized multi-community
+    vec_env = make_vec_env_multi_community(
+        arm='treatment', num_envs=32, config=config, seed=42
+    )
 """
 
 from typing import Dict, Optional, Tuple, Any, List
@@ -58,6 +62,7 @@ class AllelopathicHarvestGymEnv(gym.Env):
         config: Optional[Dict] = None,
         seed: Optional[int] = None,
         enable_telemetry: bool = True,
+        multi_community_mode: bool = False,
     ):
         """Initialize the Gymnasium environment.
 
@@ -65,6 +70,7 @@ class AllelopathicHarvestGymEnv(gym.Env):
             arm: 'treatment' or 'control' (controls PERMITTED_COLOR observation exposure)
             config: Configuration dict with keys:
                 - permitted_color_index: int (1=RED, 2=GREEN, 3=BLUE)
+                  (ignored if multi_community_mode=True, sampled randomly instead)
                 - startup_grey_grace: int (default 25)
                 - episode_timesteps: int (default 2000)
                 - altar_coords: Tuple[int, int] (treatment only, default (5, 15))
@@ -74,6 +80,8 @@ class AllelopathicHarvestGymEnv(gym.Env):
                 - immunity_cooldown: int (default 200)
             seed: Random seed for environment and residents
             enable_telemetry: Whether to use MetricsRecorder for tracking (default True)
+            multi_community_mode: If True, randomly sample community (RED/GREEN/BLUE) at each reset
+                                  for distributional competence training (Phase 5)
         """
         super().__init__()
 
@@ -135,6 +143,17 @@ class AllelopathicHarvestGymEnv(gym.Env):
         self._seed = seed
         if seed is not None:
             self.seed(seed)
+
+        # Multi-community mode setup (Phase 5)
+        self.multi_community_mode = multi_community_mode
+        if self.multi_community_mode:
+            # Communities: 1=RED, 2=GREEN, 3=BLUE
+            self.communities = [1, 2, 3]
+            # Per-worker RNG for independent sampling
+            self._community_rng = np.random.RandomState(seed)
+            # Current community tracking
+            self._current_community_idx = None
+            self._current_community_name = None
 
         # Define observation space
         self.observation_space = self._make_observation_space()
@@ -204,6 +223,32 @@ class AllelopathicHarvestGymEnv(gym.Env):
         # Reset timestep counter
         self._current_timestep = 0
 
+        # Sample community if multi-community mode (Phase 5)
+        if self.multi_community_mode:
+            # Randomly sample community (independent per worker)
+            self._current_community_idx = self._community_rng.choice(self.communities)
+            self._current_community_name = {1: 'RED', 2: 'GREEN', 3: 'BLUE'}[self._current_community_idx]
+
+            # Update config with sampled community
+            self.config['permitted_color_index'] = self._current_community_idx
+            self.env_config.permitted_color_index = self._current_community_idx
+
+            # Recreate info extractor with new community
+            self._info_extractor = ResidentInfoExtractor(
+                num_players=self.num_players,
+                permitted_color_index=self._current_community_idx,
+                startup_grey_grace=self.config.get('startup_grey_grace', 25),
+            )
+
+            # Recreate recorder with new community
+            if self.enable_telemetry:
+                self._recorder = MetricsRecorder(
+                    num_players=self.num_players,
+                    ego_index=self.ego_index,
+                    permitted_color_index=self._current_community_idx,
+                    startup_grey_grace=self.config.get('startup_grey_grace', 25),
+                )
+
         # Reset resident controller
         self._resident_controller.reset(seed=self._seed)
 
@@ -240,6 +285,11 @@ class AllelopathicHarvestGymEnv(gym.Env):
 
         # Build info dict
         info = {'timestep_count': self._current_timestep}
+
+        # Add community tag if multi-community mode (Phase 5)
+        if self.multi_community_mode:
+            info['community_tag'] = self._current_community_name
+            info['community_idx'] = self._current_community_idx
 
         return obs, info
 
@@ -298,6 +348,11 @@ class AllelopathicHarvestGymEnv(gym.Env):
         if self._recorder is not None:
             info['r_eval'] = self._recorder.get_r_eval()
             info['ego_body_color'] = self._recorder.get_ego_body_color()
+
+        # Add community tag if multi-community mode (Phase 5)
+        if self.multi_community_mode:
+            info['community_tag'] = self._current_community_name
+            info['community_idx'] = self._current_community_idx
 
         return obs, reward, terminated, truncated, info
 
@@ -428,6 +483,54 @@ def make_vec_env_control(
                 config=config,
                 seed=seeds[rank],
                 enable_telemetry=enable_telemetry,
+            )
+            return env
+        return _init
+
+    return SubprocVecEnv([make_env(i) for i in range(num_envs)])
+
+
+def make_vec_env_multi_community(
+    arm: str,
+    num_envs: int,
+    config: Dict,
+    seed: int,
+    enable_telemetry: bool = False,
+) -> gym.vector.VectorEnv:
+    """Create vectorized multi-community environments (Phase 5).
+
+    Each worker independently samples community (RED/GREEN/BLUE) at each reset.
+    This ensures unbiased mixture gradients and avoids schedule confounding.
+
+    Args:
+        arm: 'treatment' or 'control'
+        num_envs: Number of parallel environments
+        config: Base configuration dict (permitted_color_index will be sampled)
+        seed: Base random seed (each worker gets seed+rank)
+        enable_telemetry: Whether to enable MetricsRecorder (default False for training)
+
+    Returns:
+        Vectorized environment (SubprocVecEnv for isolation)
+
+    Example:
+        With num_envs=32, seed=42, each worker samples community independently:
+        - Worker 0: seed=42, samples RED → GREEN → BLUE → ...
+        - Worker 1: seed=43, samples GREEN → RED → RED → ...
+        - Worker 2: seed=44, samples BLUE → GREEN → RED → ...
+        - ...
+
+        Over many episodes, law of large numbers ensures ~1:1:1 ratio.
+    """
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+
+    def make_env(rank):
+        def _init():
+            env = AllelopathicHarvestGymEnv(
+                arm=arm,
+                config=config.copy(),  # Copy to avoid shared state
+                seed=seed + rank,  # Different seed per worker
+                enable_telemetry=enable_telemetry,
+                multi_community_mode=True,  # Enable Phase 5 sampling
             )
             return env
         return _init
