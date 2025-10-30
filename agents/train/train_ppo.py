@@ -138,6 +138,7 @@ def make_vec_env(
     seed: int,
     enable_telemetry: bool = False,
     multi_community: bool = False,
+    include_timestep: bool = False,
 ):
     """Create vectorized environment (treatment or control).
 
@@ -148,6 +149,7 @@ def make_vec_env(
         seed: Base random seed
         enable_telemetry: Whether to enable MetricsRecorder
         multi_community: If True, use multi-community mode (Phase 5)
+        include_timestep: Include normalized timestep in observations (default False)
 
     Returns:
         Vectorized environment
@@ -160,6 +162,7 @@ def make_vec_env(
             config=config,
             seed=seed,
             enable_telemetry=enable_telemetry,
+            include_timestep=include_timestep,
         )
         return vec_env
 
@@ -174,6 +177,7 @@ def make_vec_env(
             config=config,
             seeds=env_seeds,
             enable_telemetry=enable_telemetry,
+            include_timestep=include_timestep,
         )
     elif arm == 'control':
         vec_env = make_vec_env_control(
@@ -181,6 +185,7 @@ def make_vec_env(
             config=config,
             seeds=env_seeds,
             enable_telemetry=enable_telemetry,
+            include_timestep=include_timestep,
         )
     else:
         raise ValueError(f"arm must be 'treatment' or 'control', got {arm}")
@@ -223,6 +228,10 @@ def train(
     # Create vectorized environment
     mode_str = "multi-community" if multi_community else "single-community"
     print(f"Creating {training_config['n_envs']} vectorized {mode_str} environments...")
+
+    # Get include_timestep from env_config (default False to avoid temporal confounds)
+    include_timestep = env_config.get('include_timestep', False)
+
     vec_env = make_vec_env(
         arm=arm,
         config=env_config,
@@ -230,6 +239,7 @@ def train(
         seed=training_config['seed'],
         enable_telemetry=False,  # Disable telemetry during training for speed
         multi_community=multi_community,
+        include_timestep=include_timestep,
     )
 
     # Wrap with VecNormalize (for reward normalization)

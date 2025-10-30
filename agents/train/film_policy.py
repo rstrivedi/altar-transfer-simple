@@ -58,12 +58,15 @@ class DictFeaturesExtractor(BaseFeaturesExtractor):
 
     Processing:
         1. CNN(RGB) → h_visual (256,)
-        2. Concat [h_visual, READY_TO_SHOOT, TIMESTEP] → h_raw (258,)
+        2. Concat [h_visual, READY_TO_SHOOT, [TIMESTEP]] → h_raw (257 or 258,)
         3. Linear projection → h (256,)
         4. [Optional] LSTM(h) → h_lstm (256,)
 
+    Note: TIMESTEP is optional. If not present in observations, it's padded with zeros
+    to maintain fixed input dimension for the combine_projection layer.
+
     Args:
-        observation_space: Dict space with keys 'rgb', 'ready_to_shoot', 'timestep', ['permitted_color']
+        observation_space: Dict space with keys 'rgb', 'ready_to_shoot', ['timestep'], ['permitted_color']
         recurrent: Whether to use LSTM (default False)
         lstm_hidden_size: LSTM hidden size (default 256)
         trunk_dim: Output feature dimension (default 256)
@@ -102,12 +105,14 @@ class DictFeaturesExtractor(BaseFeaturesExtractor):
         # Linear projection from CNN output to trunk_dim
         self.cnn_projection = nn.Linear(cnn_out_size, trunk_dim)
 
-        # Vector features: READY_TO_SHOOT (1) + TIMESTEP (1) = 2
-        vector_dim = 2
+        # Vector features: READY_TO_SHOOT (1) + [TIMESTEP (1) if included]
+        # Note: We'll determine actual vector_dim dynamically in forward()
+        # Max vector_dim = 2 (ready_to_shoot + timestep)
+        max_vector_dim = 2
 
         # Linear projection: [h_visual; vectors] → trunk_dim
         # Added by RST: Combine visual and vector features
-        self.combine_projection = nn.Linear(trunk_dim + vector_dim, trunk_dim)
+        self.combine_projection = nn.Linear(trunk_dim + max_vector_dim, trunk_dim)
 
         # Optional LSTM
         if self.recurrent:
@@ -123,7 +128,7 @@ class DictFeaturesExtractor(BaseFeaturesExtractor):
         """Extract features from observations.
 
         Args:
-            observations: Dict with keys 'rgb', 'ready_to_shoot', 'timestep', ['permitted_color']
+            observations: Dict with keys 'rgb', 'ready_to_shoot', ['timestep'], ['permitted_color']
 
         Returns:
             Features tensor of shape (batch_size, trunk_dim)
@@ -140,7 +145,13 @@ class DictFeaturesExtractor(BaseFeaturesExtractor):
 
         # Extract vector features
         ready_to_shoot = observations['ready_to_shoot']  # (batch, 1)
-        timestep = observations['timestep']  # (batch, 1)
+
+        # Optionally include timestep if present (otherwise pad with zeros)
+        if 'timestep' in observations:
+            timestep = observations['timestep']  # (batch, 1)
+        else:
+            # Pad with zeros to maintain fixed input dimension for combine_projection
+            timestep = torch.zeros_like(ready_to_shoot)
 
         # Concatenate visual and vector features
         h_raw = torch.cat([h_visual, ready_to_shoot, timestep], dim=1)  # (batch, trunk_dim + 2)

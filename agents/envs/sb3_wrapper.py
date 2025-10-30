@@ -63,6 +63,7 @@ class AllelopathicHarvestGymEnv(gym.Env):
         seed: Optional[int] = None,
         enable_telemetry: bool = True,
         multi_community_mode: bool = False,
+        include_timestep: bool = False,
     ):
         """Initialize the Gymnasium environment.
 
@@ -82,6 +83,9 @@ class AllelopathicHarvestGymEnv(gym.Env):
             enable_telemetry: Whether to use MetricsRecorder for tracking (default True)
             multi_community_mode: If True, randomly sample community (RED/GREEN/BLUE) at each reset
                                   for distributional competence training (Phase 5)
+            include_timestep: If True, include normalized timestep (t/T) in observations (default False)
+                             Note: Timestep can create temporal confounds - agents may learn grace period
+                             timing rather than normative compliance. Disable for cleaner causal pathway.
         """
         super().__init__()
 
@@ -91,6 +95,7 @@ class AllelopathicHarvestGymEnv(gym.Env):
         self.arm = arm
         self.enable_treatment = (arm == 'treatment')
         self.enable_telemetry = enable_telemetry
+        self.include_timestep = include_timestep
 
         # Setup config
         if config is None:
@@ -180,14 +185,18 @@ class AllelopathicHarvestGymEnv(gym.Env):
     def _make_observation_space(self) -> spaces.Dict:
         """Build observation space based on arm (treatment vs control).
 
-        Treatment: RGB + READY_TO_SHOOT + TIMESTEP + PERMITTED_COLOR
-        Control: RGB + READY_TO_SHOOT + TIMESTEP
+        Base: RGB + READY_TO_SHOOT
+        Optional: + TIMESTEP (if include_timestep=True)
+        Treatment only: + PERMITTED_COLOR
         """
         obs_dict = {
             'rgb': spaces.Box(low=0, high=255, shape=(88, 88, 3), dtype=np.uint8),
             'ready_to_shoot': spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
-            'timestep': spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
         }
+
+        if self.include_timestep:
+            # Optional: Include normalized timestep (t/T) ∈ [0,1]
+            obs_dict['timestep'] = spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32)
 
         if self.enable_treatment:
             # Treatment arm includes permitted color observation
@@ -365,7 +374,7 @@ class AllelopathicHarvestGymEnv(gym.Env):
             dmlab_timestep: dm_env.TimeStep from wrapped environment
 
         Returns:
-            Dict with keys: rgb, ready_to_shoot, timestep, [permitted_color]
+            Dict with keys: rgb, ready_to_shoot, [timestep], [permitted_color]
         """
         ego_obs_raw = dmlab_timestep.observation[self.ego_index]
 
@@ -375,15 +384,16 @@ class AllelopathicHarvestGymEnv(gym.Env):
         # Extract READY_TO_SHOOT (scalar → (1,) float32)
         ready_to_shoot = np.array([ego_obs_raw['READY_TO_SHOOT']], dtype=np.float32)
 
-        # Compute normalized timestep (t / episode_len) ∈ [0, 1]
-        timestep_norm = np.array([self._current_timestep / self.episode_len], dtype=np.float32)
-
         # Build observation dict
         obs = {
             'rgb': rgb,
             'ready_to_shoot': ready_to_shoot,
-            'timestep': timestep_norm,
         }
+
+        # Optionally add normalized timestep (t / episode_len) ∈ [0, 1]
+        if self.include_timestep:
+            timestep_norm = np.array([self._current_timestep / self.episode_len], dtype=np.float32)
+            obs['timestep'] = timestep_norm
 
         # Add PERMITTED_COLOR if treatment arm
         if self.enable_treatment:
@@ -421,6 +431,7 @@ def make_vec_env_treatment(
     config: Dict,
     seeds: Optional[List[int]] = None,
     enable_telemetry: bool = False,
+    include_timestep: bool = False,
 ) -> gym.vector.VectorEnv:
     """Create vectorized treatment environments.
 
@@ -429,6 +440,7 @@ def make_vec_env_treatment(
         config: Configuration dict
         seeds: List of seeds (length must equal num_envs), or None for random
         enable_telemetry: Whether to enable MetricsRecorder (default False for training)
+        include_timestep: Include normalized timestep in observations (default False)
 
     Returns:
         Vectorized environment (SubprocVecEnv for isolation)
@@ -447,6 +459,7 @@ def make_vec_env_treatment(
                 config=config,
                 seed=seeds[rank],
                 enable_telemetry=enable_telemetry,
+                include_timestep=include_timestep,
             )
             return env
         return _init
@@ -459,6 +472,7 @@ def make_vec_env_control(
     config: Dict,
     seeds: Optional[List[int]] = None,
     enable_telemetry: bool = False,
+    include_timestep: bool = False,
 ) -> gym.vector.VectorEnv:
     """Create vectorized control environments.
 
@@ -467,6 +481,7 @@ def make_vec_env_control(
         config: Configuration dict
         seeds: List of seeds (length must equal num_envs), or None for random
         enable_telemetry: Whether to enable MetricsRecorder (default False for training)
+        include_timestep: Include normalized timestep in observations (default False)
 
     Returns:
         Vectorized environment (SubprocVecEnv for isolation)
@@ -485,6 +500,7 @@ def make_vec_env_control(
                 config=config,
                 seed=seeds[rank],
                 enable_telemetry=enable_telemetry,
+                include_timestep=include_timestep,
             )
             return env
         return _init
@@ -498,6 +514,7 @@ def make_vec_env_multi_community(
     config: Dict,
     seed: int,
     enable_telemetry: bool = False,
+    include_timestep: bool = False,
 ) -> gym.vector.VectorEnv:
     """Create vectorized multi-community environments (Phase 5).
 
@@ -510,6 +527,7 @@ def make_vec_env_multi_community(
         config: Base configuration dict (permitted_color_index will be sampled)
         seed: Base random seed (each worker gets seed+rank)
         enable_telemetry: Whether to enable MetricsRecorder (default False for training)
+        include_timestep: Include normalized timestep in observations (default False)
 
     Returns:
         Vectorized environment (SubprocVecEnv for isolation)
@@ -533,6 +551,7 @@ def make_vec_env_multi_community(
                 seed=seed + rank,  # Different seed per worker
                 enable_telemetry=enable_telemetry,
                 multi_community_mode=True,  # Enable Phase 5 sampling
+                include_timestep=include_timestep,
             )
             return env
         return _init

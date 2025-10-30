@@ -44,10 +44,13 @@ class WandbLoggingCallback(BaseCallback):
     Args:
         config: Configuration dict
         arm: 'treatment' or 'control'
+        multi_community: Whether this is Phase 5 multi-community training
         project: W&B project name (default 'altar-transfer')
         entity: W&B entity (optional)
         run_name: W&B run name (optional, auto-generated if None)
         tags: List of tags for the run
+        log_interval: Log FiLM diagnostics every N timesteps (default 2560 = 10 rollouts)
+        verbose: Verbosity level
     """
 
     def __init__(
@@ -59,6 +62,7 @@ class WandbLoggingCallback(BaseCallback):
         entity: Optional[str] = None,
         run_name: Optional[str] = None,
         tags: Optional[list] = None,
+        log_interval: int = 2560,  # Log FiLM diagnostics every N steps (default: every 10 rollouts with n_steps=256)
         verbose: int = 0,
     ):
         super().__init__(verbose)
@@ -67,6 +71,7 @@ class WandbLoggingCallback(BaseCallback):
         self.multi_community = multi_community  # Edited by RST: Track Phase 5 mode
         self.project = project
         self.entity = entity
+        self.log_interval = log_interval
         # Edited by RST: Update run name and tags for Phase 5
         phase = 5 if multi_community else 4
         self.run_name = run_name or f'phase{phase}_{arm}{"_multi" if multi_community else ""}'
@@ -126,10 +131,150 @@ class WandbLoggingCallback(BaseCallback):
         # Log standard metrics (already logged by SB3 to tensorboard)
         # W&B will auto-sync tensorboard logs
 
-        # TODO: Add custom head-wise metrics, FiLM diagnostics
-        # This requires accessing policy internals during training
+        # Log custom FiLM diagnostics and head-wise metrics every N steps
+        if self.num_timesteps % self.log_interval == 0:
+            self._log_film_diagnostics()
+            self._log_head_wise_stats()
+            self._log_action_distribution()
 
         return True
+
+    def _log_film_diagnostics(self) -> None:
+        """Log FiLM parameter norms and gradients.
+
+        This helps diagnose whether the policy is learning to use the institutional signal.
+        Expected behavior:
+        - Treatment: gamma/beta should deviate from identity (1, 0) as training progresses
+        - Control: gamma/beta should stay near identity (signal is zeros, so no learning)
+        """
+        import torch
+
+        try:
+            policy = self.model.policy
+
+            # Check if policy has FiLM modules (FiLMTwoHeadPolicy)
+            if not hasattr(policy, 'global_film'):
+                return
+
+            # Global FiLM parameter norms
+            global_gamma_weights = policy.global_film.gamma_layer.weight
+            global_gamma_bias = policy.global_film.gamma_layer.bias
+            global_beta_weights = policy.global_film.beta_layer.weight
+            global_beta_bias = policy.global_film.beta_layer.bias
+
+            self.wandb_run.log({
+                'film/global_gamma_weight_norm': torch.norm(global_gamma_weights).item(),
+                'film/global_gamma_bias_norm': torch.norm(global_gamma_bias).item(),
+                'film/global_beta_weight_norm': torch.norm(global_beta_weights).item(),
+                'film/global_beta_bias_norm': torch.norm(global_beta_bias).item(),
+                # Log deviation from identity initialization
+                'film/global_gamma_bias_deviation': torch.norm(global_gamma_bias - 1.0).item(),
+                'film/global_beta_bias_deviation': torch.norm(global_beta_bias).item(),
+            }, step=self.num_timesteps)
+
+            # Local FiLM (sanction head) parameter norms
+            if hasattr(policy, 'local_film'):
+                local_gamma_weights = policy.local_film.gamma_layer.weight
+                local_gamma_bias = policy.local_film.gamma_layer.bias
+                local_beta_weights = policy.local_film.beta_layer.weight
+                local_beta_bias = policy.local_film.beta_layer.bias
+
+                self.wandb_run.log({
+                    'film/local_gamma_weight_norm': torch.norm(local_gamma_weights).item(),
+                    'film/local_gamma_bias_norm': torch.norm(local_gamma_bias).item(),
+                    'film/local_beta_weight_norm': torch.norm(local_beta_weights).item(),
+                    'film/local_beta_bias_norm': torch.norm(local_beta_bias).item(),
+                    'film/local_gamma_bias_deviation': torch.norm(local_gamma_bias - 1.0).item(),
+                    'film/local_beta_bias_deviation': torch.norm(local_beta_bias).item(),
+                }, step=self.num_timesteps)
+
+            # Gradient norms (if gradients exist)
+            if global_gamma_weights.grad is not None:
+                self.wandb_run.log({
+                    'film/global_gamma_grad_norm': torch.norm(global_gamma_weights.grad).item(),
+                    'film/global_beta_grad_norm': torch.norm(global_beta_weights.grad).item(),
+                }, step=self.num_timesteps)
+
+            if hasattr(policy, 'local_film') and policy.local_film.gamma_layer.weight.grad is not None:
+                self.wandb_run.log({
+                    'film/local_gamma_grad_norm': torch.norm(policy.local_film.gamma_layer.weight.grad).item(),
+                    'film/local_beta_grad_norm': torch.norm(policy.local_film.beta_layer.weight.grad).item(),
+                }, step=self.num_timesteps)
+
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"Warning: Could not log FiLM diagnostics: {e}")
+
+    def _log_head_wise_stats(self) -> None:
+        """Log head-wise entropy and action head statistics.
+
+        This helps diagnose whether game and sanction heads are learning differently.
+        """
+        import torch
+
+        try:
+            policy = self.model.policy
+
+            # Get recent rollout buffer data
+            if hasattr(self.model, 'rollout_buffer') and self.model.rollout_buffer.size() > 0:
+                # Sample from buffer
+                buffer = self.model.rollout_buffer
+
+                # Get actions from buffer (last N actions)
+                if hasattr(buffer, 'actions'):
+                    actions = buffer.actions[-100:]  # Last 100 actions
+
+                    # Count zap actions (action index 7)
+                    zap_count = (actions == 7).sum().item()
+                    total_count = len(actions)
+                    zap_rate = zap_count / total_count if total_count > 0 else 0.0
+
+                    self.wandb_run.log({
+                        'policy/zap_rate': zap_rate,
+                        'policy/zap_count': zap_count,
+                    }, step=self.num_timesteps)
+
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"Warning: Could not log head-wise stats: {e}")
+
+    def _log_action_distribution(self) -> None:
+        """Log action distribution statistics.
+
+        This helps diagnose exploration vs exploitation and action diversity.
+        """
+        import torch
+
+        try:
+            # Get recent actions from rollout buffer
+            if hasattr(self.model, 'rollout_buffer') and self.model.rollout_buffer.size() > 0:
+                buffer = self.model.rollout_buffer
+
+                if hasattr(buffer, 'actions'):
+                    actions = buffer.actions[-1000:]  # Last 1000 actions
+
+                    # Compute action histogram
+                    action_counts = torch.bincount(actions.flatten().long(), minlength=11)
+                    action_probs = action_counts.float() / action_counts.sum()
+
+                    # Log per-action probabilities
+                    action_names = ['NOOP', 'FORWARD', 'BACKWARD', 'STEP_LEFT', 'STEP_RIGHT',
+                                    'TURN_LEFT', 'TURN_RIGHT', 'ZAP', 'PLANT_RED', 'PLANT_GREEN', 'PLANT_BLUE']
+
+                    for i, name in enumerate(action_names):
+                        self.wandb_run.log({
+                            f'actions/{name}_prob': action_probs[i].item(),
+                        }, step=self.num_timesteps)
+
+                    # Log action entropy (diversity)
+                    action_entropy = -(action_probs * torch.log(action_probs + 1e-8)).sum().item()
+                    self.wandb_run.log({
+                        'actions/entropy': action_entropy,
+                    }, step=self.num_timesteps)
+
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"Warning: Could not log action distribution: {e}")
 
     def _on_training_end(self) -> None:
         """Called at the end of training."""
@@ -480,6 +625,7 @@ def create_callbacks(
             project=config.get('logging', {}).get('wandb_project', 'altar-transfer'),
             entity=config.get('logging', {}).get('wandb_entity'),
             run_name=config.get('logging', {}).get('wandb_run_name'),
+            log_interval=config.get('logging', {}).get('log_interval', 2560),  # FiLM diagnostics logging frequency
         )
         callbacks.append(wandb_callback)
 
