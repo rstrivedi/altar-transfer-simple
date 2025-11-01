@@ -10,24 +10,29 @@ Tests verify:
 6. Reward accounting: R_eval = R_total - α
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 import numpy as np
 import pytest
 
-from meltingpot.utils.substrates import substrate
-from meltingpot.configs.substrates import allelopathic_harvest
+import meltingpot.substrate as substrate
+from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
 from agents.envs import NormativeObservationFilter, NormativeMetricsLogger
+from agents.utils.event_parser import parse_events
 
 
 def test_parity_normative_gate_disabled():
   """Test that normative_gate=False preserves base AH behavior."""
   config = allelopathic_harvest.get_config()
-  config.normative_gate = False  # Disable normative system
+  with config.unlocked():
+    config.normative_gate = False  # Disable normative system
 
   roles = ["default"] * 4
-  env = substrate.build(
-      substrate_name="allelopathic_harvest",
-      roles=roles,
-      config=config)
+  env = substrate.build_from_config(
+      config=config,
+      roles=roles)
 
   timestep = env.reset()
 
@@ -49,14 +54,14 @@ def test_parity_normative_gate_disabled():
 def test_permitted_color_observation_exists_with_normative_gate():
   """Test that PERMITTED_COLOR observation exists when normative_gate=True."""
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = 2  # GREEN
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = 2  # GREEN
 
   roles = ["default"] * 4
-  env = substrate.build(
-      substrate_name="allelopathic_harvest",
-      roles=roles,
-      config=config)
+  env = substrate.build_from_config(
+      config=config,
+      roles=roles)
 
   timestep = env.reset()
 
@@ -81,14 +86,14 @@ def test_permitted_color_observation_exists_with_normative_gate():
 def test_observation_filter_treatment_keeps_permitted_color():
   """Test that treatment condition keeps PERMITTED_COLOR observation."""
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = 1  # RED
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = 1  # RED
 
   roles = ["default"] * 4
-  env = substrate.build(
-      substrate_name="allelopathic_harvest",
-      roles=roles,
-      config=config)
+  env = substrate.build_from_config(
+      config=config,
+      roles=roles)
 
   # Wrap with treatment condition
   env = NormativeObservationFilter(env, enable_treatment_condition=True)
@@ -105,14 +110,14 @@ def test_observation_filter_treatment_keeps_permitted_color():
 def test_observation_filter_control_removes_permitted_color():
   """Test that control condition removes PERMITTED_COLOR observation."""
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = 1  # RED
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = 1  # RED
 
   roles = ["default"] * 4
-  env = substrate.build(
-      substrate_name="allelopathic_harvest",
-      roles=roles,
-      config=config)
+  env = substrate.build_from_config(
+      config=config,
+      roles=roles)
 
   # Wrap with control condition
   env = NormativeObservationFilter(env, enable_treatment_condition=False)
@@ -180,29 +185,29 @@ def test_metrics_logger_compute_r_eval():
 def test_normative_system_runs_without_crash():
   """Integration test: run environment with normative system for multiple steps."""
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.enable_treatment_condition = True
-  config.permitted_color_index = 1  # RED
-  config.altar_coords = (5, 15)
+  with config.unlocked():
+    config.normative_gate = True
+    config.enable_treatment_condition = True
+    config.permitted_color_index = 1  # RED
+    config.altar_coords = (5, 15)
 
   roles = ["default"] * 8
-  env = substrate.build(
-      substrate_name="allelopathic_harvest",
-      roles=roles,
-      config=config)
+  env = substrate.build_from_config(
+      config=config,
+      roles=roles)
 
   env = NormativeObservationFilter(env, enable_treatment_condition=True)
   logger = NormativeMetricsLogger(num_players=8)
 
   timestep = env.reset()
   logger.reset()
-  logger.process_events(env.events())
+  logger.process_events(parse_events(env.events()))
 
   # Run for 100 steps with random actions
   for step in range(100):
     actions = [env.action_spec()[i].generate_value() for i in range(8)]
     timestep = env.step(actions)
-    logger.process_events(env.events())
+    logger.process_events(parse_events(env.events()))
 
     if timestep.last():
       break

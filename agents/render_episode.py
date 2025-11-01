@@ -12,9 +12,9 @@ import argparse
 from typing import Optional
 
 import numpy as np
-from meltingpot.utils.substrates import substrate
-from meltingpot.configs.substrates import allelopathic_harvest
-from agents.envs import NormativeObservationFilter, NormativeMetricsLogger
+import meltingpot.substrate as substrate
+from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
+from agents.envs.normative_observation_filter import NormativeObservationFilter
 
 
 def render_episode(
@@ -42,31 +42,26 @@ def render_episode(
   """
   # Get config with normative gate enabled
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.enable_treatment_condition = enable_treatment
-  config.permitted_color_index = permitted_color
+  with config.unlocked():
+    config.normative_gate = True
+    config.enable_treatment_condition = enable_treatment
+    config.permitted_color_index = permitted_color
 
-  # Set altar position if treatment (center-top of map for visibility)
-  if enable_treatment:
-    config.altar_coords = (5, 15)  # Adjust based on map layout
+    # Set altar position if treatment (center-top of map for visibility)
+    if enable_treatment:
+      config.altar_coords = (5, 15)  # Adjust based on map layout
 
   # Build substrate
   roles = ["default"] * num_players
-  env = substrate.build(
-      substrate_name="allelopathic_harvest",
-      roles=roles,
-      config=config)
+  env = substrate.build_from_config(
+      config=config,
+      roles=roles)
 
   # Wrap with observation filter
   env = NormativeObservationFilter(env, enable_treatment_condition=enable_treatment)
 
-  # Initialize metrics logger
-  logger = NormativeMetricsLogger(num_players)
-
   # Reset environment
   timestep = env.reset()
-  logger.reset()
-  logger.process_events(env.events())
 
   frames = []
   rgb_frame = env.observation()[0]["WORLD.RGB"]
@@ -94,24 +89,18 @@ def render_episode(
 
     timestep = env.step(actions)
     events = env.events()
-    logger.process_events(events)
 
     rgb_frame = env.observation()[0]["WORLD.RGB"]
     frames.append(rgb_frame)
 
     if interactive:
-      _print_step_info(step, ego_player, ego_action, timestep, events, logger)
+      _print_step_info(step, ego_player, ego_action, timestep, events)
       _display_frame(rgb_frame, step)
 
     if timestep.last():
       break
 
-  # Get episode summary
-  summary = logger.get_episode_summary()
   print(f"Episode complete: {len(frames)} frames")
-  print(f"Alpha total: {summary['alpha_total']:.2f}")
-  print(f"Beta total: {summary['beta_total']:.2f}")
-  print(f"C total: {summary['c_total']:.2f}")
 
   # Save or display video
   if output_path:
@@ -124,7 +113,7 @@ def render_episode(
 
 
 def _print_step_info(step: int, ego_player: int, ego_action: int,
-                     timestep, events, logger):
+                     timestep, events):
   """Print information about what happened this step.
 
   Args:
@@ -133,7 +122,6 @@ def _print_step_info(step: int, ego_player: int, ego_action: int,
     ego_action: Action taken by ego.
     timestep: Timestep from environment.
     events: Events from env.events().
-    logger: NormativeMetricsLogger instance.
   """
   action_names = ['NOOP', 'FORWARD', 'STEP_RIGHT', 'BACKWARD', 'STEP_LEFT',
                   'TURN_LEFT', 'TURN_RIGHT', 'FIRE_ZAP',
@@ -142,12 +130,6 @@ def _print_step_info(step: int, ego_player: int, ego_action: int,
   print(f"\n--- Step {step} ---")
   print(f"Action: {action_names[ego_action] if ego_action < len(action_names) else ego_action}")
   print(f"Reward: {timestep.reward[ego_player]:.2f}")
-
-  # Show reward components for ego
-  alpha = logger.get_alpha_sum(ego_player)
-  beta = logger.get_beta_sum(ego_player)
-  c = logger.get_c_sum(ego_player)
-  print(f"Cumulative - α: {alpha:.2f}, β: {beta:.2f}, c: {c:.2f}")
 
   # Show relevant events
   for event in events:

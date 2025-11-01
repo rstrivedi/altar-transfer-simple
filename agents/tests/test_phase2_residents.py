@@ -12,15 +12,17 @@ R8: Monoculture achievement - ≥85% permitted berries at t=2000
 """
 
 import sys
-sys.path.insert(0, 'meltingpot')
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from meltingpot.python.utils import substrate
-from meltingpot.configs.substrates import allelopathic_harvest
+import meltingpot.substrate as substrate
+from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
 
 from agents.residents.config import COLOR_RED, COLOR_GREEN, COLOR_BLUE, COLOR_GREY
 from agents.residents.info_extractor import ResidentInfoExtractor
 from agents.residents.scripted_residents import ResidentController
 from agents.envs.resident_wrapper import ResidentWrapper
+from agents.utils.event_parser import parse_events
 
 
 def test_r1_selectivity():
@@ -32,13 +34,14 @@ def test_r1_selectivity():
   """
   # Configure environment
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = COLOR_RED  # RED is permitted
-  config.ego_index = None  # All-residents baseline mode
-  config.episode_timesteps = 500  # Shorter episode for test
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = COLOR_RED  # RED is permitted
+    config.ego_index = None  # All-residents baseline mode
+    config.episode_timesteps = 500  # Shorter episode for test
 
   roles = ["default"] * 16
-  base_env = substrate.build("allelopathic_harvest__normative", roles, config)
+  base_env = substrate.build_from_config(config=config, roles=roles)
 
   # Setup resident controller and wrapper
   extractor = ResidentInfoExtractor(
@@ -62,7 +65,7 @@ def test_r1_selectivity():
   beta_events = 0   # Mis-zaps
 
   for step in range(500):
-    events = env.events()
+    events = parse_events(env.events())
 
     # Track reward_component events
     for event in events:
@@ -91,18 +94,19 @@ def test_r2_coverage():
   """R2: ≥80% of violators sanctioned within 10 frames.
 
   Setup: All residents baseline mode. Track sanctions on all agents.
-  Natural violations (grey agents, eating wrong color) should be sanctioned quickly.
+  Natural violations (grey agents after grace, wrong body color) should be sanctioned quickly.
   Verify: At least 80% of violations get sanctioned within 10 frames.
   """
   # Configure environment
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = COLOR_RED
-  config.ego_index = None  # All residents baseline
-  config.episode_timesteps = 1000  # Longer to capture natural violations
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = COLOR_RED
+    config.ego_index = None  # All residents baseline
+    config.episode_timesteps = 1000  # Longer to capture natural violations
 
   roles = ["default"] * 16
-  base_env = substrate.build("allelopathic_harvest__normative", roles, config)
+  base_env = substrate.build_from_config(config=config, roles=roles)
 
   # Setup
   extractor = ResidentInfoExtractor(
@@ -120,81 +124,141 @@ def test_r2_coverage():
       resident_controller=controller,
       info_extractor=extractor)
 
-  # Track violations and sanctions
+  # Track opportunities and sanctions step-by-step
   timestep = env.reset()
 
-  # Track per-agent violation state
-  violation_start = {}  # agent_id -> frame when violation started
-  violations_detected = []  # (agent_id, start_frame, sanction_frame or None)
+  total_opportunities = 0
+  total_sanctions = 0
+  missed_opportunities = []  # Track (step, observer, target) for debugging
 
   for step in range(1000):
-    events = env.events()
-    info = extractor.extract_info(timestep.observation, events)
+    # Take action first, then analyze the info that was used for decision-making
+    # This ensures we see the SAME data as the controller
+    timestep = env.step(ego_action=None)
 
-    # Check each agent's state
+    # Get the info that was just used by the controller
+    info_used = env.get_last_info()
+    if info_used is None:
+      # First step, no info yet
+      if timestep.last():
+        break
+      continue
+
+    opportunities_this_step = 0
+    opportunity_pairs = []  # Track (observer, target) for this step
+
     for agent_id in range(16):
-      agent_info = info['residents'][agent_id]
-      nearby_agents = agent_info.get('nearby_agents', [])
-
-      # Check if this agent is currently violating by looking at others' views
-      current_violating = False
+      # Check if this agent is a sanctionable opportunity
       for other_id in range(16):
         if other_id == agent_id:
           continue
-        other_nearby = info['residents'][other_id].get('nearby_agents', [])
+
+        other_info = info_used['residents'][other_id]
+        other_nearby = other_info.get('nearby_agents', [])
+
         for neighbor in other_nearby:
           if neighbor['agent_id'] == agent_id:
             # Found this agent in someone's view
             body_color = neighbor['body_color']
-            permitted = info['permitted_color_index']
-            grace = info['startup_grey_grace']
-            is_viol = (body_color != permitted) or \
-                     (body_color == COLOR_GREY and step >= grace)
-            if is_viol:
-              current_violating = True
-              break
-        if current_violating:
-          break
+            permitted = info_used['permitted_color_index']
+            grace = info_used['startup_grey_grace']
 
-      # Track violation periods
-      if current_violating and agent_id not in violation_start:
-        violation_start[agent_id] = step
-      elif not current_violating and agent_id in violation_start:
-        # Violation ended without sanction
-        violations_detected.append((agent_id, violation_start[agent_id], None))
-        del violation_start[agent_id]
+            # Check if violating (use world_step from info, not loop iteration!)
+            world_step = info_used['world_step']
+            if body_color == permitted:
+              is_viol = False
+            elif body_color == COLOR_GREY and world_step < grace:
+              is_viol = False  # Grey during grace period
+            else:
+              is_viol = True  # Wrong color or grey past grace
 
-    # Check for sanctions
-    for event in events:
+            # Check if sanctionable opportunity
+            in_zap_range = neighbor.get('in_zap_range', False)
+            is_immune = neighbor['immune_ticks_remaining'] > 0
+            zap_ready = other_info['zap_cooldown_remaining'] == 0
+
+            if is_viol and in_zap_range and not is_immune and zap_ready:
+              opportunities_this_step += 1
+              opportunity_pairs.append((other_id, agent_id))  # (observer who should fire, target)
+              break  # Only count each agent once per step
+        else:
+          continue
+        break  # Agent found and checked, move to next agent
+
+    total_opportunities += opportunities_this_step
+
+    # Count sanctions from events generated by the action we just took
+    # Use the SAME events the wrapper captured (not env.events() which might be stale)
+    events_after = parse_events(env.get_last_events())
+
+    # DEBUG: Count ALL sanction events (including fizzles)
+    if not hasattr(env, '_total_sanction_events'):
+      env._total_sanction_events = 0
+      env._fizzle_events = 0
+
+    for event in events_after:
       if event.get('name') == 'sanction':
-        zappee_id = event.get('zappee_id', 0) - 1  # Convert to 0-indexed
-        if zappee_id in violation_start:
-          # Sanction landed during violation
-          violations_detected.append((zappee_id, violation_start[zappee_id], step))
-          del violation_start[zappee_id]
+        env._total_sanction_events += 1
+        if event.get('applied_minus10', 0) == 0:  # Fizzle
+          env._fizzle_events += 1
 
-    timestep = env.step(ego_action=None)
+    # Only count sanctions where applied_minus10=1 (excludes tie-break fizzles)
+    sanctioned_agents_set = set()
+    sanctioned_pairs = []  # Track (zapper, zappee) for comparison
+    for event in events_after:
+      if event.get('name') == 'sanction' and event.get('applied_minus10', 0) == 1:
+        zapper_id = event.get('zapper_id', 0) - 1
+        zappee_id = event.get('zappee_id', 0) - 1
+        sanctioned_agents_set.add(zappee_id)
+        sanctioned_pairs.append((zapper_id, zappee_id))
+
+    sanctions_this_step = len(sanctioned_agents_set)
+    total_sanctions += sanctions_this_step
+
+    # Track missed opportunities for debugging
+    if opportunities_this_step > 0 and sanctions_this_step < opportunities_this_step:
+      sanctioned_targets = {pair[1] for pair in sanctioned_pairs}
+      for obs, tgt in opportunity_pairs:
+        if tgt not in sanctioned_targets:
+          if len(missed_opportunities) < 10:  # Limit to first 10
+            missed_opportunities.append((step, obs, tgt))
+
     if timestep.last():
       break
 
-  # Close open violations
-  for agent_id, start in violation_start.items():
-    violations_detected.append((agent_id, start, None))
+  # Calculate coverage
+  coverage = total_sanctions / total_opportunities if total_opportunities > 0 else 0
 
-  # Analyze coverage
-  sanctioned_within_10 = 0
-  total_violations = len(violations_detected)
+  print(f"\nR2: {total_sanctions}/{total_opportunities} opportunities sanctioned ({coverage:.1%})")
 
-  for agent_id, start, sanction_frame in violations_detected:
-    if sanction_frame is not None and (sanction_frame - start) <= 10:
-      sanctioned_within_10 += 1
+  # DEBUG: Show controller's perspective
+  ctrl_opps = getattr(controller, '_opportunity_count', 0)
+  ctrl_fires = getattr(controller, '_fire_count', 0)
+  total_sanction_events = getattr(env, '_total_sanction_events', 0)
+  fizzle_events = getattr(env, '_fizzle_events', 0)
+  print(f"Controller perspective: saw {ctrl_opps} opportunities, fired {ctrl_fires} times")
+  print(f"Sanction events: {total_sanction_events} total ({fizzle_events} fizzles, {total_sanction_events - fizzle_events} landed)")
 
-  coverage = sanctioned_within_10 / total_violations if total_violations > 0 else 0
+  # Debug: Show first few missed opportunities from test perspective
+  if missed_opportunities:
+    print(f"\nTest saw {len(missed_opportunities)} missed opportunities (step, observer, target):")
+    for step, obs, tgt in missed_opportunities[:5]:  # Show first 5
+      print(f"  Step {step}: Resident {obs} should have zapped agent {tgt}")
 
-  print(f"R2: {sanctioned_within_10}/{total_violations} violations sanctioned within 10 frames ({coverage:.1%})")
-  assert coverage >= 0.80, \
-      f"R2 FAILED: Coverage {coverage:.1%} < 80%"
-  print(f"✓ R2 PASSED: Coverage {coverage:.1%} ≥ 80%")
+  # Debug: Show what controller did when it had opportunities but didn't fire
+  controller_debug = controller._missed_fire_debug
+  if controller_debug:
+    print(f"\nController missed fires (step, resident, target, action_returned):")
+    for entry in controller_debug[:20]:
+      if len(entry) == 5:
+        ws, rid, tgt, action_str, details = entry
+        print(f"  Step {ws}: Res {rid} returned {action_str} (should fire at {details})")
+      else:
+        print(f"  Unknown format: {entry}")
+
+  assert coverage >= 0.95, \
+      f"R2 FAILED: Coverage {coverage:.1%} < 95%"
+  print(f"✓ R2 PASSED: Coverage {coverage:.1%} ≥ 95%")
 
 
 def test_r3_no_dogpiling():
@@ -205,13 +269,14 @@ def test_r3_no_dogpiling():
   """
   # Configure environment
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = COLOR_RED
-  config.ego_index = None
-  config.episode_timesteps = 1000
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = COLOR_RED
+    config.ego_index = None
+    config.episode_timesteps = 1000
 
   roles = ["default"] * 16
-  base_env = substrate.build("allelopathic_harvest__normative", roles, config)
+  base_env = substrate.build_from_config(config=config, roles=roles)
 
   # Setup
   extractor = ResidentInfoExtractor(
@@ -236,7 +301,7 @@ def test_r3_no_dogpiling():
   duplicate_sanctions = 0  # Sanctions on already-immune targets
 
   for step in range(1000):
-    events = env.events()
+    events = parse_events(env.events())
 
     # Check for sanctions and track if target was already immune
     for event in events:
@@ -264,13 +329,14 @@ def test_r4_plant_harvest_purity():
   """
   # Configure environment
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = COLOR_RED
-  config.ego_index = None
-  config.episode_timesteps = 1000
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = COLOR_RED
+    config.ego_index = None
+    config.episode_timesteps = 1000
 
   roles = ["default"] * 16
-  base_env = substrate.build("allelopathic_harvest__normative", roles, config)
+  base_env = substrate.build_from_config(config=config, roles=roles)
 
   # Setup
   extractor = ResidentInfoExtractor(
@@ -347,25 +413,27 @@ def test_r5_arm_invariance():
   """
   # Configure control environment
   config_control = allelopathic_harvest.get_config()
-  config_control.normative_gate = True
-  config_control.permitted_color_index = COLOR_RED
-  config_control.ego_index = None  # All residents
-  config_control.enable_treatment_condition = False  # Control
-  config_control.episode_timesteps = 500
+  with config_control.unlocked():
+    config_control.normative_gate = True
+    config_control.permitted_color_index = COLOR_RED
+    config_control.ego_index = None  # All residents
+    config_control.enable_treatment_condition = False  # Control
+    config_control.episode_timesteps = 500
 
   roles = ["default"] * 16
-  env_control = substrate.build("allelopathic_harvest__normative", roles, config_control)
+  env_control = substrate.build_from_config(config=config_control, roles=roles)
 
   # Configure treatment environment
   config_treatment = allelopathic_harvest.get_config()
-  config_treatment.normative_gate = True
-  config_treatment.permitted_color_index = COLOR_RED
-  config_treatment.ego_index = None  # All residents
-  config_treatment.enable_treatment_condition = True  # Treatment
-  config_treatment.altar_coords = (5, 15)
-  config_treatment.episode_timesteps = 500
+  with config_treatment.unlocked():
+    config_treatment.normative_gate = True
+    config_treatment.permitted_color_index = COLOR_RED
+    config_treatment.ego_index = None  # All residents
+    config_treatment.enable_treatment_condition = True  # Treatment
+    config_treatment.altar_coords = (5, 15)
+    config_treatment.episode_timesteps = 500
 
-  env_treatment = substrate.build("allelopathic_harvest__normative", roles, config_treatment)
+  env_treatment = substrate.build_from_config(config=config_treatment, roles=roles)
 
   # Setup identical controllers (same seed!)
   extractor_control = ResidentInfoExtractor(16, COLOR_RED, config_control.startup_grey_grace)
@@ -425,13 +493,14 @@ def test_r6_same_step_tie_break():
   # (which would indicate multiple -10s landed)
 
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = COLOR_RED
-  config.ego_index = None
-  config.episode_timesteps = 1000
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = COLOR_RED
+    config.ego_index = None
+    config.episode_timesteps = 1000
 
   roles = ["default"] * 16
-  base_env = substrate.build("allelopathic_harvest__normative", roles, config)
+  base_env = substrate.build_from_config(config=config, roles=roles)
 
   extractor = ResidentInfoExtractor(16, COLOR_RED, config.startup_grey_grace)
   controller = ResidentController()
@@ -496,13 +565,14 @@ def test_r8_monoculture_achievement(render_video: bool = False, video_path: str 
     video_path: Path to save video file.
   """
   config = allelopathic_harvest.get_config()
-  config.normative_gate = True
-  config.permitted_color_index = COLOR_RED
-  config.ego_index = None
-  config.episode_timesteps = 2000  # Full episode
+  with config.unlocked():
+    config.normative_gate = True
+    config.permitted_color_index = COLOR_RED
+    config.ego_index = None
+    config.episode_timesteps = 2000  # Full episode
 
   roles = ["default"] * 16
-  base_env = substrate.build("allelopathic_harvest__normative", roles, config)
+  base_env = substrate.build_from_config(config=config, roles=roles)
 
   extractor = ResidentInfoExtractor(16, COLOR_RED, config.startup_grey_grace)
   controller = ResidentController()

@@ -83,6 +83,10 @@ class StepMetrics:
   ego_action: int  # Action taken by ego (0-10)
   ego_zap_attempted: bool  # True if ego fired zap (action==7)
 
+  # === Global state ===
+  permitted_color_index: int  # 1=RED, 2=GREEN, 3=BLUE
+  berry_counts: Tuple[int, int, int]  # (red, green, blue) from BERRIES_BY_TYPE observation
+
   # === Population events ===
   # All sanctions this step (including ego as zapper or zappee)
   sanctions: List[SanctionEvent] = field(default_factory=list)
@@ -92,10 +96,6 @@ class StepMetrics:
 
   # All eats this step
   eats: List[EatEvent] = field(default_factory=list)
-
-  # === Global state ===
-  permitted_color_index: int  # 1=RED, 2=GREEN, 3=BLUE
-  berry_counts: Tuple[int, int, int]  # (red, green, blue) from BERRIES_BY_TYPE observation
 
   # === Phase 5: Multi-community tracking ===
   community_tag: Optional[str] = None  # 'RED', 'GREEN', or 'BLUE' (if multi_community_mode)
@@ -113,10 +113,6 @@ class EpisodeMetrics:
   episode_len: int  # Number of steps
   seed: int  # RNG seed for reproducibility
   arm: str  # 'control' or 'treatment'
-
-  # === Phase 5: Multi-community tracking ===
-  community_tag: Optional[str] = None  # 'RED', 'GREEN', or 'BLUE' (if multi_community_mode)
-  community_idx: Optional[int] = None  # 1, 2, or 3 (if multi_community_mode)
 
   # === Ego return components ===
   r_env_sum: float  # Σ r_env over episode
@@ -139,9 +135,6 @@ class EpisodeMetrics:
   # Lower is better (ego receiving fewer sanctions)
   sanction_regret_events: int  # Requires resident_baseline_sanctions as input
 
-  # Sanction-regret (time): always 0 in our setup (no freeze/removal)
-  sanction_regret_time: int = 0  # Stub for completeness
-
   # === SUPPORTING METRIC: Compliance behavior ===
   compliance_pct: float  # % steps where ego is compliant
   violations_per_1k: float  # # violating steps × (1000 / episode_len)
@@ -157,15 +150,24 @@ class EpisodeMetrics:
   selectivity_no_violation: float  # Should → 0 (no mis-zaps)
   selectivity_with_violation: float  # Should → 1 (always zap violators)
 
+  # === SUPPORTING METRIC: Social outcomes ===
+  permitted_share: float  # plant_counts[permitted]/Σ(plant_counts)
+  monoculture_fraction: float  # max(plant_counts)/Σ(plant_counts)
+
+  # === Fields with defaults (must come after all non-default fields) ===
+
+  # === Phase 5: Multi-community tracking ===
+  community_tag: Optional[str] = None  # 'RED', 'GREEN', or 'BLUE' (if multi_community_mode)
+  community_idx: Optional[int] = None  # 1, 2, or 3 (if multi_community_mode)
+
+  # Sanction-regret (time): always 0 in our setup (no freeze/removal)
+  sanction_regret_time: int = 0  # Stub for completeness
+
   # For selectivity computation, track opportunities
   num_steps_violation_in_range: int = 0
   num_steps_no_violation_in_range: int = 0
   num_zaps_when_violation: int = 0
   num_zaps_when_no_violation: int = 0
-
-  # === SUPPORTING METRIC: Social outcomes ===
-  permitted_share: float  # plant_counts[permitted]/Σ(plant_counts)
-  monoculture_fraction: float  # max(plant_counts)/Σ(plant_counts)
 
   final_berry_counts: Tuple[int, int, int] = (0, 0, 0)  # (red, green, blue) at t=final
 
@@ -198,11 +200,9 @@ class RunMetrics:
   # === PRIMARY METRICS (mean ± std) ===
   value_gap_mean: float
   value_gap_std: float
-  value_gap_episodes: List[float] = field(default_factory=list)  # Per-episode values
 
   sanction_regret_mean: float
   sanction_regret_std: float
-  sanction_regret_episodes: List[int] = field(default_factory=list)
 
   # === SUPPORTING METRICS (mean ± std) ===
   compliance_pct_mean: float
@@ -228,6 +228,10 @@ class RunMetrics:
 
   r_eval_mean: float
   r_eval_std: float
+
+  # === Per-episode values (for detailed analysis) ===
+  value_gap_episodes: List[float] = field(default_factory=list)
+  sanction_regret_episodes: List[int] = field(default_factory=list)
 
   # === Return decomposition (for charts) ===
   r_env_sum_mean: float = 0.0

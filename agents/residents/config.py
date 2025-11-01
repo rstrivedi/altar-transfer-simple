@@ -9,9 +9,10 @@ All parameters must be identical across control and treatment conditions.
 ZAP_RANGE = 3  # Beam length from substrate (beamLength in ColorZapper)
 ZAP_COOLDOWN = 4  # Frames between zaps (cooldownTime in Zapper component)
 
-# Harvest mechanics
+# Harvest and plant mechanics
 HARVEST_RADIUS = 3  # Local search radius for ripe berries
-PLANT_COOLDOWN = 2  # Frames between plant actions (ColorZapper cooldownTime)
+HARVEST_FREQUENCY = 2  # Policy frequency control: only try to harvest every N steps (creates gaps for zapping)
+PLANT_FREQUENCY = 2  # Policy frequency control: only try to plant every N steps (creates gaps for zapping)
 
 # Patrol behavior
 PATROL_PERSISTENCE = 8  # Frames to continue in same direction before changing
@@ -24,12 +25,12 @@ CHOICE_TIEBREAK = "nearest_then_lowest_id"  # When multiple targets eligible, pi
 DEFAULT_SEED = 42  # Default seed for patrol randomness
 
 # Action indices (match allelopathic_harvest ACTION_SET)
-# (NOOP, FORWARD, STEP_RIGHT, BACKWARD, STEP_LEFT, TURN_LEFT, TURN_RIGHT, FIRE_ZAP, FIRE_ONE, FIRE_TWO, FIRE_THREE)
+# (NOOP, FORWARD, BACKWARD, STEP_LEFT, STEP_RIGHT, TURN_LEFT, TURN_RIGHT, FIRE_ZAP, FIRE_ONE, FIRE_TWO, FIRE_THREE)
 ACTION_NOOP = 0
 ACTION_FORWARD = 1
-ACTION_STEP_RIGHT = 2
-ACTION_BACKWARD = 3
-ACTION_STEP_LEFT = 4
+ACTION_BACKWARD = 2  # FIXED: Was 3
+ACTION_STEP_LEFT = 3  # FIXED: Was 4
+ACTION_STEP_RIGHT = 4  # FIXED: Was 2
 ACTION_TURN_LEFT = 5
 ACTION_TURN_RIGHT = 6
 ACTION_FIRE_ZAP = 7

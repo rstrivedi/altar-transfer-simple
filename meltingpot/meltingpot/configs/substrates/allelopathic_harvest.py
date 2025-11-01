@@ -896,8 +896,9 @@ def create_marking_overlay(player_idx: int, config: config_dict.ConfigDict = Non
                 "kwargs": {
                     "initialState": "avatarMarkingWait",
                     "stateConfigs": [
-                        # Invisible active state
+                        # Invisible active state - needs layer to receive onHit callbacks
                         {"state": "avatarMarking",
+                         "layer": "superOverlay",
                          "groups": ["avatarMarkings"]},
                         # Invisible inactive state
                         {"state": "avatarMarkingWait",
@@ -907,6 +908,16 @@ def create_marking_overlay(player_idx: int, config: config_dict.ConfigDict = Non
             },
             {
                 "component": "Transform",
+            },
+            {
+                "component": "Appearance",
+                "kwargs": {
+                    "renderMode": "ascii_shape",
+                    "spriteNames": ["InvisibleMarking"],
+                    "spriteShapes": [shapes.CUTE_AVATAR],
+                    "palettes": [shapes.get_palette((0, 0, 0, 0))],  # Fully transparent
+                    "noRotates": [True]
+                }
             },
             {
                 "component": "SimpleZapSanction",
@@ -1087,7 +1098,6 @@ def create_colored_avatar_overlay(player_idx: int,
     overlay_object["components"].append({
         "component": "ImmunityTracker",
         "kwargs": {
-            "playerIndex": lua_idx,
             "immunityCooldown": config.immunity_cooldown,
         }
     })

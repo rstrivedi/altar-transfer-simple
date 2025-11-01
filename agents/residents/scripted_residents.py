@@ -2,7 +2,13 @@
 """Deterministic scripted resident controller implementing equilibrium play.
 
 Residents enforce the posted rule, harvest/replant permitted color, and patrol.
-Policy priority: P1 (zap) > P2 (plant) > P3 (harvest) > P4 (patrol)
+Policy priority: P1 (zap) > P2 (harvest) > P3 (plant) > P4 (patrol)
+
+Enforcement is HIGHEST priority - residents interrupt harvest/plant to zap violators.
+Zapping strategy (hybrid approach):
+- If violator in zap range → fire immediately
+- If violator could be zapped (geometrically possible) → turn toward them
+- This balances responsiveness (turn toward targets) with speed (only 1 turn/step)
 """
 
 import math
@@ -19,6 +25,8 @@ class ResidentController:
     """Initialize the controller."""
     self._rng = None
     self._patrol_state = {}  # Per-resident patrol state
+    self._last_plant_step = {}  # Per-resident last plant step for frequency control
+    self._step_count = 0  # Global step counter
 
   def reset(self, seed: int = cfg.DEFAULT_SEED):
     """Reset controller for new episode.
@@ -28,6 +36,8 @@ class ResidentController:
     """
     self._rng = np.random.RandomState(seed)
     self._patrol_state = {}
+    self._last_plant_step = {}
+    self._step_count = 0
 
   def act(self, resident_id: int, info: Dict) -> int:
     """Select action for a resident agent.
@@ -39,27 +49,29 @@ class ResidentController:
     Returns:
       Action index (0-10).
     """
+    self._step_count += 1
+
     # Get resident-specific info
     resident_info = info['residents'][resident_id]
     world_step = info['world_step']
     permitted_color_index = info['permitted_color_index']
     startup_grey_grace = info['startup_grey_grace']
 
-    # P1: Enforce (Zap violators)
+    # P1: Enforce (Zap violators - HIGHEST PRIORITY)
     zap_action = self._try_zap(
         resident_info, permitted_color_index, world_step, startup_grey_grace)
     if zap_action is not None:
       return zap_action
 
-    # P2: Replant permitted color
-    plant_action = self._try_plant(resident_info, permitted_color_index)
-    if plant_action is not None:
-      return plant_action
-
-    # P3: Harvest (move toward ripe berry)
-    harvest_action = self._try_harvest(resident_info)
+    # P2: Harvest (move toward ripe berry)
+    harvest_action = self._try_harvest(resident_info, resident_id)
     if harvest_action is not None:
       return harvest_action
+
+    # P3: Replant permitted color (with frequency control)
+    plant_action = self._try_plant(resident_info, permitted_color_index, resident_id)
+    if plant_action is not None:
+      return plant_action
 
     # P4: Patrol (fallback)
     return self._patrol(resident_id)
@@ -105,7 +117,11 @@ class ResidentController:
   def _try_zap(
       self, resident_info: Dict, permitted: int, world_step: int, grace: int
   ) -> Optional[int]:
-    """P1: Try to zap eligible violators.
+    """P3: Try to zap eligible violators.
+
+    Strategy: If violator in zap range → fire. If violator could be zapped
+    (geometrically possible) → turn toward them. This is faster than original
+    full pursuit but more active than pure opportunistic.
 
     Args:
       resident_info: Resident's info dict.
@@ -114,7 +130,7 @@ class ResidentController:
       grace: Grace period for grey agents.
 
     Returns:
-      ACTION_FIRE_ZAP if should zap, None otherwise.
+      ACTION_FIRE_ZAP or turn action if targeting, None otherwise.
     """
     # Check if zap is off cooldown
     if resident_info['zap_cooldown_remaining'] > 0:
@@ -123,113 +139,91 @@ class ResidentController:
     # Get nearby agents
     nearby_agents = resident_info['nearby_agents']
 
-    # Filter for eligible targets
-    eligible_targets = [
+
+    # First pass: check if anyone is in zap range RIGHT NOW
+    for agent in nearby_agents:
+      if agent.get('in_zap_range', False):
+        is_elig = self._is_eligible(agent, permitted, world_step, grace)
+        if is_elig:
+          return cfg.ACTION_FIRE_ZAP
+
+    # Second pass: turn toward nearest zappable violator
+    eligible_zappable = [
         agent for agent in nearby_agents
-        if self._is_eligible(agent, permitted, world_step, grace)
+        if agent.get('could_zap', False) and self._is_eligible(agent, permitted, world_step, grace)
     ]
 
-    if not eligible_targets:
+    if not eligible_zappable:
       return None
 
-    # Select nearest target (tie-break: lowest agent_id)
-    # Calculate distance for each target
-    targets_with_distance = []
-    for target in eligible_targets:
-      rel_x, rel_y = target['rel_pos']
-      distance = math.sqrt(rel_x ** 2 + rel_y ** 2)
-      targets_with_distance.append((distance, target['agent_id'], target))
+    # Select nearest (tie-break: lowest agent_id)
+    nearest = min(eligible_zappable, key=lambda a: (
+        math.sqrt(a['rel_pos'][0]**2 + a['rel_pos'][1]**2),
+        a['agent_id']
+    ))
 
-    # Sort by distance, then agent_id
-    targets_with_distance.sort(key=lambda x: (x[0], x[1]))
 
-    # Select first (nearest, lowest id)
-    selected_target = targets_with_distance[0][2]
+    # Turn toward them (one step)
+    return self._turn_toward(nearest['rel_pos'], resident_info['orientation'])
 
-    return cfg.ACTION_FIRE_ZAP
-
-  def _try_plant(self, resident_info: Dict, permitted: int) -> Optional[int]:
+  def _try_plant(self, resident_info: Dict, permitted: int, resident_id: int) -> Optional[int]:
     """P2: Try to plant permitted color on nearby unripe berries.
 
-    Note: Plant beam has beamLength=3, so can plant from up to 3 cells away.
+    Frequency control: Only attempts planting every PLANT_FREQUENCY steps.
+    On non-plant steps, returns None to allow fall-through to zapping.
 
     Args:
       resident_info: Resident's info dict.
       permitted: Permitted color index.
+      resident_id: Agent ID for tracking last plant step.
 
     Returns:
-      Plant action if should plant, None otherwise.
+      Plant action or movement action on plant steps, None on non-plant steps.
     """
+    # Check frequency control FIRST - return None on non-plant steps
+    last_plant = self._last_plant_step.get(resident_id, -999)
+    if self._step_count - last_plant < cfg.PLANT_FREQUENCY:
+      # Not time to plant yet - return None to allow fall-through to zapping
+      return None
+
+    # On plant steps, try to plant or move toward berries
     nearby_unripe_berries = resident_info.get('nearby_unripe_berries', [])
 
     if not nearby_unripe_berries:
       return None
 
-    # Plant the nearest unripe berry
-    # Note: In this simplified version, we just fire the plant beam.
-    # The beam will hit unripe berries in the direction the agent is facing.
-    # Ideally we'd track orientation and turn toward the berry first,
-    # but for equilibrium play, simply planting when unripe berries are nearby
-    # should achieve monoculture over time.
+    # Select nearest unripe berry
+    nearest = min(nearby_unripe_berries, key=lambda b: b['distance'])
 
-    return cfg.PLANT_ACTION_MAP[permitted]
+    # If close enough to plant (beam length = 3)
+    if nearest['distance'] < 3.0:
+      self._last_plant_step[resident_id] = self._step_count
+      return cfg.PLANT_ACTION_MAP[permitted]
 
-  def _try_harvest(self, resident_info: Dict) -> Optional[int]:
-    """P3: Try to move toward nearest ripe berry.
+    # Move forward (simple movement, orientation changes through patrol)
+    return cfg.ACTION_FORWARD
+
+  def _try_harvest(self, resident_info: Dict, resident_id: int) -> Optional[int]:
+    """P1: Try to move toward nearest ripe berry.
+
+    No frequency control - always moves toward ripe berries if visible.
+    This creates constant movement that brings residents into contact with violators.
 
     Args:
       resident_info: Resident's info dict.
+      resident_id: Agent ID (unused, kept for API consistency).
 
     Returns:
-      Movement action if should harvest, None otherwise.
+      Movement action if ripe berries nearby, None otherwise.
     """
     nearby_berries = resident_info.get('nearby_ripe_berries', [])
 
     if not nearby_berries:
       return None
 
-    # Select nearest berry
-    nearest_berry = min(nearby_berries, key=lambda b: b['distance'])
-    rel_x, rel_y = nearest_berry['rel_pos']
-
-    # Greedy pathfinding: turn toward berry, then move forward
-    # Determine desired direction (angle to berry)
-    angle_to_berry = math.atan2(rel_y, rel_x)  # Radians
-
-    # Convert to cardinal direction (0=right, 90=up, 180=left, 270=down)
-    # Assume agent's forward direction is along +x axis initially
-    # (This is a simplification; ideally we'd track agent orientation)
-    # For now, use a heuristic: move in direction of largest displacement
-
-    abs_x = abs(rel_x)
-    abs_y = abs(rel_y)
-
-    # If berry is very close, just move forward
-    if abs_x <= 0.5 and abs_y <= 0.5:
-      return cfg.ACTION_FORWARD
-
-    # Otherwise, use greedy approach:
-    # If more horizontal displacement, turn left/right
-    # If more vertical displacement, move forward/backward
-    # This is a simple heuristic; not optimal but reasonable
-    if abs_x > abs_y:
-      # Horizontal displacement dominant
-      if rel_x > 0:
-        # Berry is to the right, turn right or move forward depending on current orientation
-        # For simplicity, alternate between turning and moving
-        return cfg.ACTION_TURN_RIGHT
-      else:
-        # Berry is to the left
-        return cfg.ACTION_TURN_LEFT
-    else:
-      # Vertical displacement dominant
-      if rel_y > 0:
-        # Berry is up, move forward
-        return cfg.ACTION_FORWARD
-      else:
-        # Berry is down, turn around (turn twice) or move backward
-        # For simplicity, just turn
-        return cfg.ACTION_TURN_LEFT
+    # Always move toward nearest ripe berry (harvesting happens automatically)
+    # Simple forward movement - orientation changes through patrol/turns
+    return cfg.ACTION_FORWARD
 
   def _patrol(self, resident_id: int) -> int:
     """P4: Patrol with persistence.
@@ -274,3 +268,38 @@ class ResidentController:
       return cfg.ACTION_TURN_RIGHT
     else:
       raise ValueError(f"Unknown patrol direction: {direction}")
+
+  def _turn_toward(self, rel_pos: Tuple[float, float], orientation: str) -> int:
+    """Compute turn action to face toward target.
+
+    Args:
+      rel_pos: Relative position (rel_x, rel_y) to target.
+      orientation: Current facing direction ('N', 'E', 'S', 'W').
+
+    Returns:
+      TURN_LEFT or TURN_RIGHT action.
+    """
+    rel_x, rel_y = rel_pos
+    abs_x = abs(rel_x)
+    abs_y = abs(rel_y)
+
+    # Determine desired direction based on largest displacement
+    if abs_x > abs_y:
+      desired_dir = 'S' if rel_x > 0 else 'N'
+    else:
+      desired_dir = 'E' if rel_y > 0 else 'W'
+
+    # Already facing desired direction - just return a turn (shouldn't happen in _try_zap logic)
+    if orientation == desired_dir:
+      return cfg.ACTION_TURN_RIGHT
+
+    # Compute shortest turn direction
+    dirs = ['N', 'E', 'S', 'W']
+    current_idx = dirs.index(orientation)
+    desired_idx = dirs.index(desired_dir)
+
+    cw_dist = (desired_idx - current_idx) % 4
+    ccw_dist = (current_idx - desired_idx) % 4
+
+    return cfg.ACTION_TURN_RIGHT if cw_dist <= ccw_dist else cfg.ACTION_TURN_LEFT
+

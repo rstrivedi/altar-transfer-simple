@@ -367,14 +367,18 @@ function Coloring:onHit(hitterObject, hit)
       if self._config.anyUnripeColoringColorsAvatar then
         -- Set the color of the zapper to the color in which they replanted or
         -- pretended to replant if it was already colored that way.
-        colorZapper:setColor(
-            targetColorId, self._config.coloredPlayerStates[hit])
-        colorZapper:resetCrypticBerryConsumption()
+        local coloredState = self._config.coloredPlayerStates[hit]
+        if coloredState then
+          colorZapper:setColor(targetColorId, coloredState)
+          colorZapper:resetCrypticBerryConsumption()
+        end
       else
         if targetColorId ~= sourceColorId then
-          colorZapper:setColor(
-              targetColorId, self._config.coloredPlayerStates[hit])
-          colorZapper:resetCrypticBerryConsumption()
+          local coloredState = self._config.coloredPlayerStates[hit]
+          if coloredState then
+            colorZapper:setColor(targetColorId, coloredState)
+            colorZapper:resetCrypticBerryConsumption()
+          end
         end
       end
     end
@@ -668,11 +672,33 @@ function ColorZapper:setAvatarColorId(colorId)
 end
 
 function ColorZapper:setColor(idx, coloredPlayerState)
+  -- Safety check: if no state provided, skip
+  if not coloredPlayerState or coloredPlayerState == '' then
+    return
+  end
+
   -- Assume just one connected object with an `AvatarConnector` component.
-  local overlayObject = self.gameObject:getComponent(
-      'Avatar'):getAllConnectedObjectsWithNamedComponent('AvatarConnector')[1]
-  -- Change color of the player that zapped the berry to match the berry.
-  overlayObject:setState(coloredPlayerState)
+  local overlayObjects = self.gameObject:getComponent(
+      'Avatar'):getAllConnectedObjectsWithNamedComponent('AvatarConnector')
+
+  if not overlayObjects or #overlayObjects == 0 then
+    return
+  end
+
+  -- Try each overlay until we find one with the right state
+  -- (There may be multiple overlays: colored overlay and marking overlay)
+  for _, overlayObject in ipairs(overlayObjects) do
+    -- Try to set the state, skip if it doesn't exist on this overlay
+    local success, err = pcall(function()
+      overlayObject:setState(coloredPlayerState)
+    end)
+    if success then
+      -- Successfully set state on this overlay
+      break
+    end
+  end
+
+  -- Update color tracking
   self:setAvatarColorId(idx)
 
   -- Added by RST: Clear immunity when avatar color changes (planting or grey conversion)
@@ -901,10 +927,21 @@ end
 function PermittedColorHolder:reset()
   -- Added by RST: Initialize permitted color from config
   self.permittedColorIndex = self._config.permittedColorIndex
+  self._frameCount = 0
+end
+
+function PermittedColorHolder:update()
+  -- Added by RST: Track frame count for grace period
+  self._frameCount = self._frameCount + 1
 end
 
 function PermittedColorHolder:getPermittedColorIndex()
   return self.permittedColorIndex
+end
+
+function PermittedColorHolder:getFrameCount()
+  -- Added by RST: Provide frame count without needing simulation API
+  return self._frameCount
 end
 
 
@@ -971,7 +1008,10 @@ end
 function ImmunityTracker:setImmune()
   -- Added by RST: Mark avatar as immune (called when -10 lands)
   self._immune = true
-  self._immuneSetAt = self.gameObject.simulation:getFrameCount()
+  -- Get frame count from scene-level component
+  local sceneObject = self.gameObject.simulation:getSceneObject()
+  local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+  self._immuneSetAt = permittedColorHolder:getFrameCount()
 end
 
 function ImmunityTracker:clearImmunity()
@@ -983,7 +1023,9 @@ end
 function ImmunityTracker:update()
   -- Added by RST: Check for timeout (200 frames since immunity was set)
   if self._immune then
-    local currentFrame = self.gameObject.simulation:getFrameCount()
+    local sceneObject = self.gameObject.simulation:getSceneObject()
+    local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+    local currentFrame = permittedColorHolder:getFrameCount()
     if currentFrame >= self._immuneSetAt + self._config.immunityCooldown then
       self:clearImmunity()
     end
@@ -995,7 +1037,9 @@ function ImmunityTracker:getImmunityRemaining()
   if not self._immune then
     return 0
   end
-  local currentFrame = self.gameObject.simulation:getFrameCount()
+  local sceneObject = self.gameObject.simulation:getSceneObject()
+  local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+  local currentFrame = permittedColorHolder:getFrameCount()
   local elapsed = currentFrame - self._immuneSetAt
   local remaining = self._config.immunityCooldown - elapsed
   return math.max(0, remaining)
@@ -1045,12 +1089,13 @@ end
 function SimpleZapSanction:onHit(hitterObject, hitName)
   -- Added by RST: Handle zap hits with simple sanction logic
   if hitName ~= self._config.hitName then
-    return false  -- Not a zap hit, pass through
+    return false  -- Not a zap hit (plant beam), pass through to ColorZapper
   end
 
   -- Get global scene components
   local sceneObject = self.gameObject.simulation:getSceneObject()
   local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+
   local sameStepTracker = sceneObject:getComponent('SameStepSanctionTracker')
 
   -- Get target (this avatar) state
@@ -1084,7 +1129,7 @@ function SimpleZapSanction:onHit(hitterObject, hitName)
 
   -- Classify violation
   local permittedColor = permittedColorHolder:getPermittedColorIndex()
-  local currentFrame = self.gameObject.simulation:getFrameCount()
+  local currentFrame = permittedColorHolder:getFrameCount()
   local isViolation = self:_isViolation(targetColorId, permittedColor, currentFrame)
 
   -- Apply -10 to target
@@ -1143,18 +1188,22 @@ end
 function SimpleZapSanction:_logSanctionEvent(hitterObject, targetIndex, targetColorId, wasViolation, appliedMinus10, immune, tieBreak)
   -- Added by RST: Log sanction event for metrics
   local zapperIndex = hitterObject:getComponent('Avatar'):getIndex()
-  local currentFrame = self.gameObject.simulation:getFrameCount()
+
+  -- Get frame count from scene-level component
+  local sceneObject = self.gameObject.simulation:getSceneObject()
+  local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+  local currentFrame = permittedColorHolder:getFrameCount()
 
   events:add('sanction', 'dict',
              't', currentFrame,
              'zapper_id', zapperIndex,
              'zappee_id', targetIndex,
              'zappee_color', targetColorId,
-             'was_violation', wasViolation,
-             'hit', true,
-             'applied_minus10', appliedMinus10,
-             'immune', immune,
-             'tie_break', tieBreak)
+             'was_violation', wasViolation and 1 or 0,
+             'hit', 1,
+             'applied_minus10', appliedMinus10 and 1 or 0,
+             'immune', immune and 1 or 0,
+             'tie_break', tieBreak and 1 or 0)
 end
 
 
@@ -1217,21 +1266,29 @@ function InstitutionalObserver:__init__(kwargs)
 end
 
 function InstitutionalObserver:reset()
-  -- Added by RST: Initialize observation tensor (3-element one-hot)
-  self._observation = tensor.DoubleTensor(3):fill(0)
+  -- No state needed - observation is computed on demand
 end
 
 function InstitutionalObserver:addObservations(tileSet, world, observations)
   -- Added by RST: Produce PERMITTED_COLOR observation
-  local sceneObject = self.gameObject.simulation:getSceneObject()
-  local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
-  local permittedColor = permittedColorHolder:getPermittedColorIndex()
+  local playerIndex = self.gameObject:getComponent('Avatar'):getIndex()
 
-  -- Create one-hot encoding (1=RED, 2=GREEN, 3=BLUE)
-  self._observation:fill(0)
-  self._observation(permittedColor):fill(1)
+  observations[#observations + 1] = {
+      name = tostring(playerIndex) .. '.PERMITTED_COLOR',
+      type = 'Doubles',
+      shape = {3},
+      func = function(grid)
+        -- Get permitted color from scene
+        local sceneObject = self.gameObject.simulation:getSceneObject()
+        local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+        local permittedColor = permittedColorHolder:getPermittedColorIndex()
 
-  observations['PERMITTED_COLOR'] = self._observation
+        -- Create one-hot encoding (1=RED, 2=GREEN, 3=BLUE)
+        local oneHot = tensor.DoubleTensor(3):fill(0)
+        oneHot(permittedColor):fill(1)
+        return oneHot
+      end
+  }
 end
 
 
@@ -1284,7 +1341,11 @@ end
 
 function NormativeRewardTracker:_emitRewardEvent(rewardType, value)
   -- Added by RST: Emit per-step reward component event
-  local currentFrame = self.gameObject.simulation:getFrameCount()
+  -- Get frame count from scene-level component (safer than simulation API)
+  local sceneObject = self.gameObject.simulation:getSceneObject()
+  local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
+  local currentFrame = permittedColorHolder:getFrameCount()
+
   events:add('reward_component', 'dict',
              't', currentFrame,
              'player_id', self._config.playerIndex,
@@ -1322,10 +1383,17 @@ function ResidentObserver:reset()
 end
 
 function ResidentObserver:addObservations(tileSet, world, observations)
-  -- Added by RST: Provide privileged info for residents
+  -- Added by RST: Register placeholder observation
+  -- Actual resident info is emitted as events in update() method
+  -- Note: We don't query positions here because Transform hasn't started yet
+end
+
+function ResidentObserver:update()
+  -- Added by RST: Emit resident info events every frame
+  -- This runs after Transform is initialized, so getPosition() is safe
+
   -- Query all agents in the simulation
   local allAvatars = self.gameObject.simulation:getAllGameObjectsWithComponent('Avatar')
-
   local selfIndex = self.gameObject:getComponent('Avatar'):getIndex()
 
   -- Get scene-level info
@@ -1333,16 +1401,27 @@ function ResidentObserver:addObservations(tileSet, world, observations)
   local permittedColorHolder = sceneObject:getComponent('PermittedColorHolder')
   local permittedColor = permittedColorHolder:getPermittedColorIndex()
 
-  -- Get own position
+  -- Get own position and orientation (safe here because Transform has started)
   local selfPos = self.gameObject:getPosition()
+  local selfOrientation = self.gameObject:getOrientation()  -- 'N', 'E', 'S', or 'W'
 
   -- Added by RST: Get own body color for telemetry
   local selfColorZapper = self.gameObject:getComponent('ColorZapper')
-  local selfBodyColor = selfColorZapper and selfColorZapper:getColorId() or 0  -- 0=GREY default
+  local selfBodyColor = selfColorZapper and selfColorZapper.colorId or 0  -- 0=GREY default
 
-  -- Build list of nearby agents (within zap range)
+  -- Get list of agents currently in zap range (considering orientation and beam geometry)
+  local zapperComponent = self.gameObject:getComponent('Zapper')
+  local zappableIndices = zapperComponent and zapperComponent:getZappablePlayerIndices() or {}
+
+  -- Convert to set for O(1) lookup
+  local zappableSet = {}
+  for _, idx in ipairs(zappableIndices) do
+    zappableSet[idx] = true
+  end
+
+  -- Build list of nearby agents (within detection radius)
   local nearbyAgents = {}
-  local zapRange = 3  -- Match ZAP_RANGE from config
+  local detectionRadius = 5  -- Larger than zap range for awareness
 
   for _, avatarObj in ipairs(allAvatars) do
     local otherIndex = avatarObj:getComponent('Avatar'):getIndex()
@@ -1352,24 +1431,55 @@ function ResidentObserver:addObservations(tileSet, world, observations)
       local dy = otherPos[2] - selfPos[2]
       local distance = math.sqrt(dx * dx + dy * dy)
 
-      if distance <= zapRange then
+      if distance <= detectionRadius then
         -- Get color from ColorZapper component
         local colorZapper = avatarObj:getComponent('ColorZapper')
-        local bodyColor = colorZapper and colorZapper:getColorId() or 0  -- 0=GREY default
+        local bodyColor = colorZapper and colorZapper.colorId or 0  -- 0=GREY default
 
         -- Get immunity from ImmunityTracker
-        local immunityObjects = avatarObj:getAllConnectedObjectsWithNamedComponent('ImmunityTracker')
+        local immunityObjects = avatarObj:getComponent('Avatar'):getAllConnectedObjectsWithNamedComponent('ImmunityTracker')
         local immuneTicks = 0
         if #immunityObjects > 0 then
           local immunityTracker = immunityObjects[1]:getComponent('ImmunityTracker')
           immuneTicks = immunityTracker:getImmunityRemaining()
         end
 
+        -- Check if currently in zap range (based on current orientation)
+        local inZapRange = zappableSet[otherIndex] or false
+
+        -- Also compute if COULD be in zap range (if facing the right direction)
+        -- Beam parameters: beamLength=3, beamRadius=1
+        local beamLength = 3
+        local beamRadius = 1
+
+        -- Check if target could be hit if we were facing toward them
+        local couldZap = false
+        if distance <= beamLength then
+          -- Check if target is roughly aligned in any cardinal direction
+          local absDx = math.abs(dx)
+          local absDy = math.abs(dy)
+
+          -- Target could be zapped if it's primarily in one direction and within beam width
+          if absDx > absDy then
+            -- Horizontal: check if lateral offset is within beam radius
+            if absDy <= beamRadius + 0.5 then
+              couldZap = true
+            end
+          else
+            -- Vertical: check if lateral offset is within beam radius
+            if absDx <= beamRadius + 0.5 then
+              couldZap = true
+            end
+          end
+        end
+
         table.insert(nearbyAgents, {
           agent_id = otherIndex,
           rel_pos = {dx, dy},
           body_color = bodyColor,
-          immune_ticks_remaining = immuneTicks
+          immune_ticks_remaining = immuneTicks,
+          in_zap_range = inZapRange,
+          could_zap = couldZap
         })
       end
     end
@@ -1423,26 +1533,13 @@ function ResidentObserver:addObservations(tileSet, world, observations)
   local hasRipeBerry = #nearbyRipeBerries > 0
   local hasUnripeBerry = #nearbyUnripeBerries > 0
 
-  -- Encode as observation
-  -- We'll use a structured format that Python can parse
-  local obsData = {
-    permitted_color_index = permittedColor,
-    nearby_agents = nearbyAgents,
-    has_ripe_berry_in_radius = hasRipeBerry,
-    standing_on_unripe = standingOnUnripe,
-  }
-
-  -- Store as observation (Python will need to parse this)
-  observations['RESIDENT_INFO'] = tensor.DoubleTensor({1}):fill(1)  -- Placeholder
-  -- Note: dmlab2d observations must be tensors, not tables
-  -- We'll rely on events to pass the structured data instead
-
   -- Emit as event for Python to parse
   -- Added by RST: Include self_body_color for telemetry (Phase 3)
   events:add('resident_info', 'dict',
              'player_index', selfIndex,
              'permitted_color', permittedColor,
              'self_body_color', selfBodyColor,  -- Added by RST: 0=GREY, 1=RED, 2=GREEN, 3=BLUE
+             'self_orientation', selfOrientation,  -- Added by RST: 'N', 'E', 'S', or 'W'
              'nearby_agents_count', #nearbyAgents,
              'nearby_ripe_berries_count', #nearbyRipeBerries,
              'nearby_unripe_berries_count', #nearbyUnripeBerries,
@@ -1458,7 +1555,9 @@ function ResidentObserver:addObservations(tileSet, world, observations)
                'rel_x', agentInfo.rel_pos[1],
                'rel_y', agentInfo.rel_pos[2],
                'body_color', agentInfo.body_color,
-               'immune_ticks', agentInfo.immune_ticks_remaining)
+               'immune_ticks', agentInfo.immune_ticks_remaining,
+               'in_zap_range', agentInfo.in_zap_range and 1 or 0,
+               'could_zap', agentInfo.could_zap and 1 or 0)
   end
 
   -- Emit individual nearby ripe berry events

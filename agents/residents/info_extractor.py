@@ -60,7 +60,9 @@ class ResidentInfoExtractor:
 
       # Extract zap cooldown from READY_TO_SHOOT
       # READY_TO_SHOOT = 1.0 when ready, 0.0 when on cooldown
-      ready_to_shoot = obs.get('READY_TO_SHOOT', np.array([1.0]))[0]
+      ready_to_shoot_raw = obs.get('READY_TO_SHOOT', 1.0)
+      # Handle both scalar and array cases
+      ready_to_shoot = float(np.asarray(ready_to_shoot_raw).item())
       if ready_to_shoot > 0.5:
         zap_cooldown_remaining = 0
       else:
@@ -69,6 +71,7 @@ class ResidentInfoExtractor:
 
       info['residents'][agent_id] = {
           'pos': (0, 0),  # Will be updated from events if available
+          'orientation': 'N',  # Default to North
           'zap_cooldown_remaining': zap_cooldown_remaining,
           'nearby_agents': [],
           'nearby_ripe_berries': [],
@@ -115,6 +118,12 @@ class ResidentInfoExtractor:
         info['residents'][agent_id]['has_unripe_berry_in_range'] = bool(event.get('has_unripe_berry', 0))
         info['residents'][agent_id]['standing_on_unripe'] = bool(event.get('standing_on_unripe', 0))
 
+        # Update orientation (N, E, S, W)
+        orientation = event.get('self_orientation', 'N')
+        if isinstance(orientation, bytes):
+          orientation = orientation.decode('utf-8')
+        info['residents'][agent_id]['orientation'] = orientation
+
       elif event_name == 'nearby_agent':
         # Nearby agent info event
         observer_index = event.get('observer_index')
@@ -126,21 +135,26 @@ class ResidentInfoExtractor:
         if observer_id < 0 or observer_id >= self._num_players:
           continue
 
-        agent_id = event.get('agent_id', 0) - 1  # Also convert to 0-indexed
-        rel_x = event.get('rel_x', 0)
-        rel_y = event.get('rel_y', 0)
-        body_color = event.get('body_color', 0)
-        immune_ticks = event.get('immune_ticks', 0)
+        agent_id = int(event.get('agent_id', 0)) - 1  # Convert to 0-indexed int
+        rel_x = float(event.get('rel_x', 0))
+        rel_y = float(event.get('rel_y', 0))
+        body_color = int(event.get('body_color', 0))  # Convert to Python int
+        immune_ticks = int(event.get('immune_ticks', 0))  # Convert to Python int
 
         # Store in temporary structure
         if observer_id not in nearby_agents_by_observer:
           nearby_agents_by_observer[observer_id] = []
 
+        in_zap_range = bool(event.get('in_zap_range', 0))  # Convert to Python bool
+        could_zap = bool(event.get('could_zap', 0))  # Could zap if facing this direction
+
         nearby_agents_by_observer[observer_id].append({
             'agent_id': agent_id,
             'rel_pos': (rel_x, rel_y),
             'body_color': body_color,
-            'immune_ticks_remaining': immune_ticks
+            'immune_ticks_remaining': immune_ticks,
+            'in_zap_range': in_zap_range,
+            'could_zap': could_zap
         })
 
       elif event_name == 'nearby_ripe_berry':

@@ -37,14 +37,15 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from meltingpot.utils.substrates import substrate
-from meltingpot.configs.substrates import allelopathic_harvest
+import meltingpot.substrate as substrate
+from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
 
 from agents.envs.normative_observation_filter import NormativeObservationFilter
 from agents.envs.resident_wrapper import ResidentWrapper
 from agents.residents.info_extractor import ResidentInfoExtractor
 from agents.residents.scripted_residents import ResidentController
 from agents.metrics.recorder import MetricsRecorder
+from agents.utils.event_parser import parse_events
 
 
 class AllelopathicHarvestGymEnv(gym.Env):
@@ -110,15 +111,16 @@ class AllelopathicHarvestGymEnv(gym.Env):
 
         # Build substrate config
         self.env_config = allelopathic_harvest.get_config()
-        self.env_config.normative_gate = True
-        self.env_config.permitted_color_index = config['permitted_color_index']
-        self.env_config.startup_grey_grace = config.get('startup_grey_grace', 25)
-        self.env_config.ego_index = self.ego_index
-        self.env_config.enable_treatment_condition = self.enable_treatment
-        self.env_config.episode_timesteps = self.episode_len
+        with self.env_config.unlocked():
+            self.env_config.normative_gate = True
+            self.env_config.permitted_color_index = config['permitted_color_index']
+            self.env_config.startup_grey_grace = config.get('startup_grey_grace', 25)
+            self.env_config.ego_index = self.ego_index
+            self.env_config.enable_treatment_condition = self.enable_treatment
+            self.env_config.episode_timesteps = self.episode_len
 
-        if self.enable_treatment:
-            self.env_config.altar_coords = config.get('altar_coords', (5, 15))
+            if self.enable_treatment:
+                self.env_config.altar_coords = config.get('altar_coords', (5, 15))
 
         # Build base environment (will be rebuilt on reset with proper seed)
         self._base_env = None
@@ -272,7 +274,9 @@ class AllelopathicHarvestGymEnv(gym.Env):
 
         # Build base environment
         roles = ["default"] * self.num_players
-        self._base_env = substrate.build("allelopathic_harvest", roles, self.env_config)
+        self._base_env = substrate.build_from_config(
+            config=self.env_config,
+            roles=roles)
 
         # Wrap with observation filter (treatment vs control)
         env_filtered = NormativeObservationFilter(
@@ -325,7 +329,7 @@ class AllelopathicHarvestGymEnv(gym.Env):
         self._last_dmlab_timestep = dmlab_timestep
 
         # Get events from base environment
-        events = self._base_env.events()
+        events = parse_events(self._base_env.events())
 
         # Record telemetry if enabled
         if self._recorder is not None:

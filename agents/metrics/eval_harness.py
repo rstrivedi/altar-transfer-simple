@@ -58,8 +58,8 @@ FUTURE (Phase 4+): Integration with training loop
 from typing import List, Dict, Callable, Optional, Tuple
 import numpy as np
 
-from meltingpot.utils.substrates import substrate
-from meltingpot.configs.substrates import allelopathic_harvest
+import meltingpot.substrate as substrate
+from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
 
 from agents.envs.normative_observation_filter import NormativeObservationFilter
 from agents.envs.resident_wrapper import ResidentWrapper
@@ -200,14 +200,17 @@ def _run_baseline_episodes(
 
     # Build environment with ego_index=None (all residents)
     env_config = allelopathic_harvest.get_config()
-    env_config.normative_gate = True
-    env_config.permitted_color_index = config['permitted_color_index']
-    env_config.startup_grey_grace = config['startup_grey_grace']
-    env_config.ego_index = None  # All residents
-    env_config.episode_timesteps = config.get('episode_timesteps', 2000)
+    with env_config.unlocked():
+        env_config.normative_gate = True
+        env_config.permitted_color_index = config['permitted_color_index']
+        env_config.startup_grey_grace = config['startup_grey_grace']
+        env_config.ego_index = None  # All residents
+        env_config.episode_timesteps = config.get('episode_timesteps', 2000)
 
     roles = ["default"] * 16
-    base_env = substrate.build("allelopathic_harvest", roles, env_config)
+    base_env = substrate.build_from_config(
+        config=env_config,
+        roles=roles)
 
     # Wrap with ResidentWrapper (all 16 are residents)
     extractor = ResidentInfoExtractor(
@@ -296,19 +299,22 @@ def _run_ego_episodes(
 
     # Build environment with ego_index=0
     env_config = allelopathic_harvest.get_config()
-    env_config.normative_gate = True
-    env_config.permitted_color_index = config['permitted_color_index']
-    env_config.startup_grey_grace = config['startup_grey_grace']
-    env_config.ego_index = 0  # Ego is agent 0
-    env_config.enable_treatment_condition = enable_treatment
-    env_config.episode_timesteps = config.get('episode_timesteps', 2000)
+    with env_config.unlocked():
+        env_config.normative_gate = True
+        env_config.permitted_color_index = config['permitted_color_index']
+        env_config.startup_grey_grace = config['startup_grey_grace']
+        env_config.ego_index = 0  # Ego is agent 0
+        env_config.enable_treatment_condition = enable_treatment
+        env_config.episode_timesteps = config.get('episode_timesteps', 2000)
 
-    # Altar coords (if treatment)
-    if enable_treatment:
-      env_config.altar_coords = config.get('altar_coords', (5, 15))
+        # Altar coords (if treatment)
+        if enable_treatment:
+            env_config.altar_coords = config.get('altar_coords', (5, 15))
 
     roles = ["default"] * 16
-    base_env = substrate.build("allelopathic_harvest", roles, env_config)
+    base_env = substrate.build_from_config(
+        config=env_config,
+        roles=roles)
 
     # Wrap with observation filter
     env_filtered = NormativeObservationFilter(

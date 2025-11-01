@@ -399,7 +399,7 @@ def test_m9_collective_cost():
 def test_integration_recorder_captures_events():
   """Integration test: MetricsRecorder captures events from real environment."""
   from meltingpot.utils.substrates import substrate
-  from meltingpot.configs.substrates import allelopathic_harvest
+  from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
   from agents.envs.resident_wrapper import ResidentWrapper
   from agents.residents.info_extractor import ResidentInfoExtractor
   from agents.residents.scripted_residents import ResidentController
@@ -508,7 +508,7 @@ def test_integration_m7_resident_vs_resident():
 def test_integration_m4_selectivity_with_residents():
   """Integration test M4: Run residents in small env, verify selectivity."""
   from meltingpot.utils.substrates import substrate
-  from meltingpot.configs.substrates import allelopathic_harvest
+  from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
   from agents.envs.resident_wrapper import ResidentWrapper
   from agents.residents.info_extractor import ResidentInfoExtractor
   from agents.residents.scripted_residents import ResidentController
