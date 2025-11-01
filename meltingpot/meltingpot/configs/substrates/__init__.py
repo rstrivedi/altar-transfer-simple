@@ -70,6 +70,7 @@ def get_config(substrate: str) -> config_dict.ConfigDict:
 SUBSTRATES: Set[str] = frozenset({
     # keep-sorted start
     'allelopathic_harvest__open',
+    'allelopathic_harvest_normative__open',
     'bach_or_stravinsky_in_the_matrix__arena',
     'bach_or_stravinsky_in_the_matrix__repeated',
     'boat_race__eight_races',

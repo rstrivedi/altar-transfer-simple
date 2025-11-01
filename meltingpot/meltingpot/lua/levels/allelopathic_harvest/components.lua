@@ -872,6 +872,78 @@ function GlobalZapTracker:preUpdate()
 end
 
 
+--[[ Added by RST: Altar component for normative sanctioning.
+
+This scene component holds the altar color (permitted color) that defines
+the normative rule. Violations occur when body_color != altar_color.
+
+This component should be attached to the scene object.
+]]
+local Altar = class.Class(component.Component)
+
+function Altar:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('Altar')},
+      {'altarColor', args.numberType},
+  })
+  Altar.Base.__init__(self, kwargs)
+  self._config.altarColor = kwargs.altarColor
+end
+
+function Altar:reset()
+  self._altarColor = self._config.altarColor
+end
+
+function Altar:getAltarColor()
+  return self._altarColor
+end
+
+function Altar:setAltarColor(newColor)
+  self._altarColor = newColor
+end
+
+
+--[[ Added by RST: SameStepSanctionTracker component for tie-breaking.
+
+This scene component tracks which players have been sanctioned in the current
+frame to prevent multiple simultaneous sanctions on the same target.
+
+The tracker resets every frame (in update()).
+
+This component should be attached to the scene object.
+]]
+local SameStepSanctionTracker = class.Class(component.Component)
+
+function SameStepSanctionTracker:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('SameStepSanctionTracker')},
+      {'numPlayers', args.numberType},
+  })
+  SameStepSanctionTracker.Base.__init__(self, kwargs)
+  self._config.numPlayers = kwargs.numPlayers
+end
+
+function SameStepSanctionTracker:reset()
+  -- Initialize tracking tensor (1 if sanctioned this step, 0 otherwise)
+  self._sanctionedThisStep = tensor.Int32Tensor(self._config.numPlayers):fill(0)
+end
+
+function SameStepSanctionTracker:update()
+  -- Clear tracking at the start of each frame
+  self._sanctionedThisStep:fill(0)
+end
+
+function SameStepSanctionTracker:markSanctioned(playerIndex)
+  -- Mark player as sanctioned this step (Lua 1-indexed)
+  self._sanctionedThisStep(playerIndex):val(1)
+end
+
+function SameStepSanctionTracker:wasSanctionedThisStep(playerIndex)
+  -- Check if player was already sanctioned this step (Lua 1-indexed)
+  return self._sanctionedThisStep(playerIndex):val() == 1
+end
+
+
 local allComponents = {
     -- Berry components.
     Berry = Berry,
@@ -888,6 +960,8 @@ local allComponents = {
     -- Scene componenets.
     GlobalBerryTracker = GlobalBerryTracker,
     GlobalZapTracker = GlobalZapTracker,
+    Altar = Altar,  -- Added by RST
+    SameStepSanctionTracker = SameStepSanctionTracker,  -- Added by RST
 }
 
 component_registry.registerAllComponents(allComponents)

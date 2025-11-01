@@ -1121,6 +1121,284 @@ function GraduatedSanctionsMarking:_setLevel(level)
 end
 
 
+--[[ Added by RST: SimpleZapSanctioning component for normative sanctioning.
+
+This component implements institutional sanctioning with the following mechanics:
+- Violation = body_color != altar_color (after grace period)
+- Applies rewards: costForSanctioning (c), penaltyForSanctioned (-10),
+  rewardForCorrectSanctioning (alpha), penaltyForMisSanctioning (beta)
+- Checks immunity via ImmunityTracker component
+- Checks tie-break via SameStepSanctionTracker scene component
+- Blocks beam on sanction application
+
+This component should be attached to an overlay object connected to an avatar.
+]]
+local SimpleZapSanctioning = class.Class(component.Component)
+
+function SimpleZapSanctioning:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('SimpleZapSanctioning')},
+      -- `playerIndex` is the index of the player to which this component
+      -- is attached. This component will be on an overlay object.
+      {'playerIndex', args.numberType},
+      -- `waitState` (str) the state to use when the avatar is zapped out.
+      {'waitState', args.stringType},
+      -- `activeState` (str) the state to use when the avatar is alive.
+      {'activeState', args.stringType},
+      -- `hitName` (str) defines the `hit` to use for sanctioning.
+      {'hitName', args.stringType},
+      -- Reward parameters for sanctioning
+      {'costForSanctioning', args.numberType},
+      {'penaltyForSanctioned', args.numberType},
+      {'rewardForCorrectSanctioning', args.numberType},
+      {'penaltyForMisSanctioning', args.numberType},
+      -- `startupGreyGrace` (int) grace period in frames at episode start
+      {'startupGreyGrace', args.numberType},
+  })
+  self.Base.__init__(self, kwargs)
+  self._kwargs = kwargs
+end
+
+function SimpleZapSanctioning:reset()
+  local kwargs = self._kwargs
+  self._playerIndex = kwargs.playerIndex
+  self._waitState = kwargs.waitState
+  self._activeState = kwargs.activeState
+  self._hitName = kwargs.hitName
+  self._costForSanctioning = kwargs.costForSanctioning
+  self._penaltyForSanctioned = kwargs.penaltyForSanctioned
+  self._rewardForCorrectSanctioning = kwargs.rewardForCorrectSanctioning
+  self._penaltyForMisSanctioning = kwargs.penaltyForMisSanctioning
+  self._startupGreyGrace = kwargs.startupGreyGrace
+
+  -- Track timestep for grace period
+  self._timestep = 0
+end
+
+function SimpleZapSanctioning:postStart()
+  local sim = self.gameObject.simulation
+  self._avatarObject = sim:getAvatarFromIndex(self._playerIndex)
+  local avatarComponent = self._avatarObject:getComponent('Avatar')
+
+  -- Set active state and connect to avatar
+  self.gameObject:setState(self._activeState)
+  self.gameObject:teleport(self._avatarObject:getPosition(),
+                           self._avatarObject:getOrientation())
+  avatarComponent:connect(self.gameObject)
+end
+
+function SimpleZapSanctioning:registerUpdaters(updaterRegistry)
+  local incrementTimestep = function()
+    self._timestep = self._timestep + 1
+  end
+
+  updaterRegistry:registerUpdater{
+      updateFn = incrementTimestep,
+      priority = 100,  -- Run early
+  }
+end
+
+function SimpleZapSanctioning:onHit(hittingGameObject, hitName)
+  if hitName ~= self._hitName then
+    return false
+  end
+
+  -- Get components
+  local thisAvatar = self._avatarObject:getComponent('Avatar')
+  local hittingAvatar = hittingGameObject:getComponent('Avatar')
+  local scene = self.gameObject.simulation:getSceneObject()
+
+  -- Get target's body color
+  local targetColorId = self._avatarObject:getComponent('ColorZapper').colorId
+
+  -- Get altar color from scene
+  local altarColor = scene:getComponent('Altar'):getAltarColor()
+
+  -- Determine if this is a violation
+  local isViolation = (targetColorId ~= altarColor)
+
+  -- Check if still in grace period
+  local inGracePeriod = self._timestep < self._startupGreyGrace
+
+  -- Check immunity
+  local immunityObjects = self._avatarObject:getComponent('Avatar'):getAllConnectedObjectsWithNamedComponent('ImmunityTracker')
+  local isImmune = (#immunityObjects > 0 and immunityObjects[1]:getComponent('ImmunityTracker'):isImmune())
+
+  -- Check tie-break (already sanctioned this step)
+  local sameStepTracker = scene:getComponent('SameStepSanctionTracker')
+  local tieBreak = sameStepTracker:wasSanctionedThisStep(self._playerIndex)
+
+  -- Determine if sanction will be applied
+  local appliedMinus10 = not inGracePeriod and not isImmune and not tieBreak
+
+  -- Record sanctioning event (record ALL attempts)
+  events:add('sanction', 'dict',
+             't', self._timestep,
+             'zapper_id', hittingAvatar:getIndex(),
+             'zappee_id', thisAvatar:getIndex(),
+             'zappee_color', targetColorId,
+             'was_violation', isViolation,
+             'applied_minus10', appliedMinus10,
+             'immune', isImmune,
+             'tie_break', tieBreak)
+
+  -- If in grace period, fizzle without applying sanction
+  if inGracePeriod then
+    return true  -- Block beam but don't apply sanction
+  end
+
+  -- If immune, fizzle without applying sanction
+  if isImmune then
+    return true  -- Fizzle, no effect
+  end
+
+  -- If tie-break, fizzle without applying sanction
+  if tieBreak then
+    return true  -- Fizzle, no effect
+  end
+
+  -- Apply cost to zapper (always applied when sanction succeeds)
+  hittingAvatar:addReward(self._costForSanctioning)
+
+  -- Apply penalty to target (always -10)
+  thisAvatar:addReward(self._penaltyForSanctioned)
+
+  -- Apply alpha (correct sanction) or beta (incorrect sanction) to zapper
+  if isViolation then
+    hittingAvatar:addReward(self._rewardForCorrectSanctioning)
+  else
+    hittingAvatar:addReward(self._penaltyForMisSanctioning)
+  end
+
+  -- Set immunity
+  if #immunityObjects > 0 then
+    immunityObjects[1]:getComponent('ImmunityTracker'):setImmune()
+  end
+
+  -- Mark as sanctioned this step
+  sameStepTracker:markSanctioned(self._playerIndex)
+
+  return true  -- Block beam after applying sanction
+end
+
+function SimpleZapSanctioning:avatarStateChange(behavior)
+  local avatarComponent = self._avatarObject:getComponent('Avatar')
+
+  if behavior == 'respawn' then
+    avatarComponent:disconnect(self.gameObject)
+    self.gameObject:setState(self._activeState)
+    self.gameObject:teleport(self._avatarObject:getPosition(),
+                             self._avatarObject:getOrientation())
+    avatarComponent:connect(self.gameObject)
+  elseif behavior == 'die' then
+    self.gameObject:setState(self._waitState)
+  end
+end
+
+
+--[[ Added by RST: ImmunityTracker component for sanctioning immunity.
+
+This component tracks immunity status for an avatar:
+- Sets immunity for a fixed duration after being sanctioned
+- Clears immunity when duration expires OR when body color changes
+- Provides isImmune() query for SimpleZapSanctioning
+
+This component should be attached to an overlay object connected to an avatar.
+]]
+local ImmunityTracker = class.Class(component.Component)
+
+function ImmunityTracker:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('ImmunityTracker')},
+      -- `playerIndex` is the index of the player to which this component
+      -- is attached. This component will be on an overlay object.
+      {'playerIndex', args.numberType},
+      -- `waitState` (str) the state to use when the avatar is zapped out.
+      {'waitState', args.stringType},
+      -- `activeState` (str) the state to use when the avatar is alive.
+      {'activeState', args.stringType},
+      -- `immunityDuration` (int) number of frames for immunity after sanction
+      {'immunityDuration', args.numberType},
+  })
+  self.Base.__init__(self, kwargs)
+  self._kwargs = kwargs
+end
+
+function ImmunityTracker:reset()
+  local kwargs = self._kwargs
+  self._playerIndex = kwargs.playerIndex
+  self._waitState = kwargs.waitState
+  self._activeState = kwargs.activeState
+  self._immunityDuration = kwargs.immunityDuration
+
+  self._immunityTicks = 0
+  self._lastSeenColor = 0  -- Track color to detect changes
+end
+
+function ImmunityTracker:postStart()
+  local sim = self.gameObject.simulation
+  self._avatarObject = sim:getAvatarFromIndex(self._playerIndex)
+  local avatarComponent = self._avatarObject:getComponent('Avatar')
+
+  -- Set active state and connect to avatar
+  self.gameObject:setState(self._activeState)
+  self.gameObject:teleport(self._avatarObject:getPosition(),
+                           self._avatarObject:getOrientation())
+  avatarComponent:connect(self.gameObject)
+
+  -- Initialize last seen color
+  self._lastSeenColor = self._avatarObject:getComponent('ColorZapper').colorId
+end
+
+function ImmunityTracker:update()
+  -- Decrement immunity counter
+  if self._immunityTicks > 0 then
+    self._immunityTicks = self._immunityTicks - 1
+  end
+
+  -- Check for color change to clear immunity
+  local currentColor = self._avatarObject:getComponent('ColorZapper').colorId
+  if currentColor ~= self._lastSeenColor then
+    self._immunityTicks = 0
+    self._lastSeenColor = currentColor
+  end
+end
+
+function ImmunityTracker:setImmune()
+  self._immunityTicks = self._immunityDuration
+end
+
+function ImmunityTracker:clearImmunity()
+  self._immunityTicks = 0
+end
+
+function ImmunityTracker:isImmune()
+  return self._immunityTicks > 0
+end
+
+function ImmunityTracker:getImmunityTicks()
+  return self._immunityTicks
+end
+
+function ImmunityTracker:avatarStateChange(behavior)
+  local avatarComponent = self._avatarObject:getComponent('Avatar')
+
+  if behavior == 'respawn' then
+    -- Clear immunity on respawn
+    self._immunityTicks = 0
+    avatarComponent:disconnect(self.gameObject)
+    self.gameObject:setState(self._activeState)
+    self.gameObject:teleport(self._avatarObject:getPosition(),
+                             self._avatarObject:getOrientation())
+    avatarComponent:connect(self.gameObject)
+    -- Update last seen color
+    self._lastSeenColor = self._avatarObject:getComponent('ColorZapper').colorId
+  elseif behavior == 'die' then
+    self.gameObject:setState(self._waitState)
+  end
+end
+
+
 --[[ Implement a "drive" that the avatar must satisfy periodically to avoid
 incurring a (usually negative) reward per step.
 
@@ -1315,12 +1593,45 @@ function AvatarIdsInRangeToZapObservation:addObservations(
 end
 
 
+--[[ Added by RST: AltarObservation component for normative sanctioning.
+
+This component adds the ALTAR observation which exposes the permitted altar color
+to agents. This observation is needed by residents (both treatment and control)
+to condition their policy, and by ego agents in treatment condition.
+
+This component should be attached to the avatar game object.
+]]
+local AltarObservation = class.Class(component.Component)
+
+function AltarObservation:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('AltarObservation')},
+  })
+  AltarObservation.Base.__init__(self, kwargs)
+end
+
+function AltarObservation:addObservations(tileSet, world, observations)
+  local playerIndex = self.gameObject:getComponent('Avatar'):getIndex()
+  local scene = self.gameObject.simulation:getSceneObject()
+
+  observations[#observations + 1] = {
+      name = tostring(playerIndex) .. '.ALTAR',
+      type = 'Doubles',
+      shape = {},
+      func = function(grid)
+        return scene:getComponent('Altar'):getAltarColor()
+      end
+  }
+end
+
+
 local allComponents = {
     -- Components that are typically on the avatar itself.
     Avatar = Avatar,
     AvatarDirectionIndicator = AvatarDirectionIndicator,
     Zapper = Zapper,
     ReadyToShootObservation = ReadyToShootObservation,
+    AltarObservation = AltarObservation,  -- Added by RST
     PeriodicNeed = PeriodicNeed,
     Role = Role,
     AvatarIdsInViewObservation = AvatarIdsInViewObservation,
@@ -1330,6 +1641,8 @@ local allComponents = {
     -- connected to the avatar.
     AvatarConnector = AvatarConnector,
     GraduatedSanctionsMarking = GraduatedSanctionsMarking,
+    SimpleZapSanctioning = SimpleZapSanctioning,  -- Added by RST
+    ImmunityTracker = ImmunityTracker,  -- Added by RST
 }
 
 -- Register all components from this module in the component registry.

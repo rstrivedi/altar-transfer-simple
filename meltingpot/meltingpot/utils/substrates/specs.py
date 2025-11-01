@@ -36,6 +36,8 @@ REWARD = dm_env.specs.Array(shape=(), dtype=np.float64, name='reward')
 OBSERVATION = immutabledict.immutabledict({
     'READY_TO_SHOOT': dm_env.specs.Array(
         shape=(), dtype=np.float64, name='READY_TO_SHOOT'),
+    'ALTAR': dm_env.specs.Array(
+        shape=(), dtype=np.float64, name='ALTAR'),  # Added by RST: normative sanctioning altar color
     'RGB': dm_env.specs.Array(shape=(88, 88, 3), dtype=np.uint8, name='RGB'),
     'POSITION': dm_env.specs.Array(shape=(2,), dtype=np.int32, name='POSITION'),
     'ORIENTATION': dm_env.specs.Array(
