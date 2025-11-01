@@ -33,11 +33,7 @@ Model-free conventions in multi-agent reinforcement learning with heterogeneous
 preferences. arXiv preprint arXiv:2010.09054.
 """
 
-from typing import Any, Dict, Mapping, Sequence, Tuple
-
-# Added by RST: Imports for normative observation spec
-import dm_env
-import numpy as np
+from typing import Any, Dict, Mapping, Sequence
 
 from meltingpot.utils.substrates import colors
 from meltingpot.utils.substrates import game_object_utils
@@ -419,72 +415,8 @@ def create_berry_prefab(lua_index: int):
   return berry
 
 
-# Added by RST: Create altar (visual billboard) for treatment condition
-def create_altar_object(permitted_color_index: int, position: Tuple[int, int]) -> Dict[str, Any]:
-  """Return an altar object that displays the permitted color.
-
-  Args:
-    permitted_color_index: The permitted color (1=RED, 2=GREEN, 3=BLUE)
-    position: (row, col) position on the grid
-
-  Returns:
-    An altar game object (static visual billboard)
-  """
-  # Map color index to RGB
-  color_rgb = COLORS[permitted_color_index - 1]  # COLORS is 0-indexed
-
-  # Define a simple altar sprite (filled square with border)
-  altar_sprite = """
-********
-*&&&&&*
-*&&&&&*
-*&&&&&*
-*&&&&&*
-*&&&&&*
-*&&&&&*
-********
-"""
-
-  altar_object = {
-      "name": "altar",
-      "components": [
-          {
-              "component": "StateManager",
-              "kwargs": {
-                  "initialState": "altar",
-                  "stateConfigs": [{
-                      "state": "altar",
-                      "layer": "upperPhysical",
-                      "sprite": "Altar",
-                  }],
-              }
-          },
-          {
-              "component": "Transform",
-              "kwargs": {
-                  "position": list(position),
-                  "orientation": "N"
-              }
-          },
-          {
-              "component": "Appearance",
-              "kwargs": {
-                  "renderMode": "ascii_shape",
-                  "spriteNames": ["Altar"],
-                  "spriteShapes": [altar_sprite],
-                  "palettes": [shapes.get_palette(color_rgb)],
-                  "noRotates": [True]
-              }
-          },
-      ]
-  }
-  return altar_object
-
-
-# Edited by RST: Was def create_avatar_object(player_idx, most_tasty_berry_idx), now accepts config
 def create_avatar_object(player_idx: int,
-                         most_tasty_berry_idx: int,
-                         config: config_dict.ConfigDict = None) -> Dict[str, Any]:
+                         most_tasty_berry_idx: int) -> Dict[str, Any]:
   """Return the avatar for the player numbered `player_idx`."""
   # Lua is 1-indexed.
   lua_index = player_idx + 1
@@ -636,32 +568,6 @@ def create_avatar_object(player_idx: int,
     avatar_object["components"].append({
         "component": "AvatarIdsInRangeToZapObservation",
     })
-
-  # Added by RST: Add normative avatar components if normative_gate is enabled
-  if config and config.get('normative_gate', False):
-    avatar_object["components"].append({
-        "component": "ZapCostApplier",
-        "kwargs": {
-            "sanctionCostCEnabled": config.sanction_cost_c_enabled,
-            "cValue": config.c_value,
-        }
-    })
-    avatar_object["components"].append({
-        "component": "InstitutionalObserver",
-        "kwargs": {}
-    })
-
-    # Added by RST: Add ResidentObserver only to resident agents (not ego)
-    # If ego_index is None (all-residents mode), add to everyone
-    # If ego_index is set (e.g., 0), skip that agent
-    ego_index = config.get('ego_index', None)
-    is_ego = (ego_index is not None and player_idx == ego_index)
-    if not is_ego:
-      avatar_object["components"].append({
-          "component": "ResidentObserver",
-          "kwargs": {}
-      })
-
   return avatar_object
 
 # PREFABS is a dictionary mapping names to template game objects that can
@@ -718,8 +624,7 @@ ACTION_SET = (
 # The Scene objece is a non-physical object, it components implement global
 # logic. In this case, that includes holding the global berry counters to
 # implement the regrowth rate, as well as some of the observations.
-# Edited by RST: Was def create_scene(num_players: int), now accepts config
-def create_scene(num_players: int, config: config_dict.ConfigDict = None):
+def create_scene(num_players: int):
   """Creates the global scene."""
   scene = {
       "name": "scene",
@@ -762,19 +667,6 @@ def create_scene(num_players: int, config: config_dict.ConfigDict = None):
           },
       ]
   }
-
-  # Added by RST: Add normative scene components if normative_gate is enabled
-  if config and config.get('normative_gate', False):
-    scene["components"].append({
-        "component": "PermittedColorHolder",
-        "kwargs": {
-            "permittedColorIndex": config.permitted_color_index,
-        }
-    })
-    scene["components"].append({
-        "component": "SameStepSanctionTracker",
-        "kwargs": {}
-    })
   if _ENABLE_DEBUG_OBSERVATIONS:
     scene["components"].append({
         "component": "GlobalMetricReporter",
@@ -877,124 +769,63 @@ def create_scene(num_players: int, config: config_dict.ConfigDict = None):
   return scene
 
 
-# Edited by RST: Was def create_marking_overlay(player_idx: int), now accepts config
-def create_marking_overlay(player_idx: int, config: config_dict.ConfigDict = None) -> Dict[str, Any]:
-  """Create a sanctions marking overlay object."""
+def create_marking_overlay(player_idx: int) -> Dict[str, Any]:
+  """Create a graduated sanctions marking overlay object."""
   # Lua is 1-indexed.
   lua_idx = player_idx + 1
 
-  # Added by RST: Use SimpleZapSanction if normative_gate is enabled
-  use_normative = config and config.get('normative_gate', False)
+  marking_object = {
+      "name": "avatar_marking",
+      "components": [
+          {
+              "component": "StateManager",
+              "kwargs": {
+                  "initialState": "avatarMarkingWait",
+                  "stateConfigs": [
+                      # Declare one state per level of the hit logic.
+                      {"state": "level_1",
+                       "layer": "superOverlay",
+                       "sprite": "sprite_for_level_1"},
+                      {"state": "level_2",
+                       "layer": "superOverlay",
+                       "sprite": "sprite_for_level_2"},
+                      {"state": "level_3",
+                       "layer": "superOverlay",
+                       "sprite": "sprite_for_level_3"},
 
-  if use_normative:
-    # Added by RST: Simpler marking object for SimpleZapSanction (no visual states)
-    marking_object = {
-        "name": "avatar_marking",
-        "components": [
-            {
-                "component": "StateManager",
-                "kwargs": {
-                    "initialState": "avatarMarkingWait",
-                    "stateConfigs": [
-                        # Invisible active state - needs layer to receive onHit callbacks
-                        {"state": "avatarMarking",
-                         "layer": "superOverlay",
-                         "groups": ["avatarMarkings"]},
-                        # Invisible inactive state
-                        {"state": "avatarMarkingWait",
-                         "groups": ["avatarMarkingWaits"]},
-                    ]
-                }
-            },
-            {
-                "component": "Transform",
-            },
-            {
-                "component": "Appearance",
-                "kwargs": {
-                    "renderMode": "ascii_shape",
-                    "spriteNames": ["InvisibleMarking"],
-                    "spriteShapes": [shapes.CUTE_AVATAR],
-                    "palettes": [shapes.get_palette((0, 0, 0, 0))],  # Fully transparent
-                    "noRotates": [True]
-                }
-            },
-            {
-                "component": "SimpleZapSanction",
-                "kwargs": {
-                    "playerIndex": lua_idx,
-                    "hitName": "zapHit",
-                    "startupGreyGrace": config.startup_grey_grace,
-                    "alphaInReward": config.alpha_in_reward,
-                    "alphaValue": config.alpha_value,
-                    "betaValue": config.beta_value,
-                    "misZapCostBetaEnabled": config.mis_zap_cost_beta_enabled,
-                }
-            },
-            {
-                "component": "AvatarConnector",
-                "kwargs": {
-                    "playerIndex": lua_idx,
-                    "aliveState": "avatarMarking",
-                    "waitState": "avatarMarkingWait",
-                }
-            },
-        ]
-    }
-  else:
-    # Original base AH graduated sanctions marking
-    marking_object = {
-        "name": "avatar_marking",
-        "components": [
-            {
-                "component": "StateManager",
-                "kwargs": {
-                    "initialState": "avatarMarkingWait",
-                    "stateConfigs": [
-                        # Declare one state per level of the hit logic.
-                        {"state": "level_1",
-                         "layer": "superOverlay",
-                         "sprite": "sprite_for_level_1"},
-                        {"state": "level_2",
-                         "layer": "superOverlay",
-                         "sprite": "sprite_for_level_2"},
-                        {"state": "level_3",
-                         "layer": "superOverlay",
-                         "sprite": "sprite_for_level_3"},
-
-                        # Invisible inactive (zapped out) overlay type.
-                        {"state": "avatarMarkingWait",
-                         "groups": ["avatarMarkingWaits"]},
-                    ]
-                }
-            },
-            {
-                "component": "Transform",
-            },
-            {
-                "component": "Appearance",
-                "kwargs": {
-                    "renderMode": "ascii_shape",
-                    "spriteNames": ["sprite_for_level_1",
-                                    "sprite_for_level_2",
-                                    "sprite_for_level_3"],
-                    "spriteShapes": [MARKING_SPRITE,
-                                     MARKING_SPRITE,
-                                     MARKING_SPRITE],
-                    "palettes": [get_marking_palette(0.0),
-                                 get_marking_palette(0.5),
-                                 get_marking_palette(1.0)],
-                    "noRotates": [True] * 3
-                }
-            },
-            {
-                "component": "GraduatedSanctionsMarking",
-                "kwargs": {
-                    "playerIndex": lua_idx,
-                    "waitState": "avatarMarkingWait",
-                    "hitName": "zapHit",
-                    "recoveryTime": 50,
-                    "hitLogic": [
+                      # Invisible inactive (zapped out) overlay type.
+                      {"state": "avatarMarkingWait",
+                       "groups": ["avatarMarkingWaits"]},
+                  ]
+              }
+          },
+          {
+              "component": "Transform",
+          },
+          {
+              "component": "Appearance",
+              "kwargs": {
+                  "renderMode": "ascii_shape",
+                  "spriteNames": ["sprite_for_level_1",
+                                  "sprite_for_level_2",
+                                  "sprite_for_level_3"],
+                  "spriteShapes": [MARKING_SPRITE,
+                                   MARKING_SPRITE,
+                                   MARKING_SPRITE],
+                  "palettes": [get_marking_palette(0.0),
+                               get_marking_palette(0.5),
+                               get_marking_palette(1.0)],
+                  "noRotates": [True] * 3
+              }
+          },
+          {
+              "component": "GraduatedSanctionsMarking",
+              "kwargs": {
+                  "playerIndex": lua_idx,
+                  "waitState": "avatarMarkingWait",
+                  "hitName": "zapHit",
+                  "recoveryTime": 50,
+                  "hitLogic": [
                       {"levelIncrement": 1,
                        "sourceReward": 0,
                        "targetReward": 0,
@@ -1011,9 +842,7 @@ def create_marking_overlay(player_idx: int, config: config_dict.ConfigDict = Non
   return marking_object
 
 
-# Edited by RST: Was def create_colored_avatar_overlay(player_idx: int), now accepts config
-def create_colored_avatar_overlay(player_idx: int,
-                                   config: config_dict.ConfigDict = None) -> Dict[str, Any]:
+def create_colored_avatar_overlay(player_idx: int) -> Dict[str, Any]:
   """Create a colored avatar overlay object."""
   # Lua is 1-indexed.
   lua_idx = player_idx + 1
@@ -1092,29 +921,11 @@ def create_colored_avatar_overlay(player_idx: int,
           },
       ]
   }
-
-  # Added by RST: Add normative overlay components if normative_gate is enabled
-  if config and config.get('normative_gate', False):
-    overlay_object["components"].append({
-        "component": "ImmunityTracker",
-        "kwargs": {
-            "immunityCooldown": config.immunity_cooldown,
-        }
-    })
-    overlay_object["components"].append({
-        "component": "NormativeRewardTracker",
-        "kwargs": {
-            "playerIndex": lua_idx,
-        }
-    })
-
   return overlay_object
 
 
-# Edited by RST: Was def create_avatar_and_associated_objects(roles), now accepts config
 def create_avatar_and_associated_objects(
-    roles: Sequence[str],
-    config: config_dict.ConfigDict = None):
+    roles: Sequence[str]):
   """Returns list of avatar objects and associated other objects."""
   avatar_objects = []
   additional_objects = []
@@ -1125,12 +936,11 @@ def create_avatar_and_associated_objects(
       most_tasty_berry_idx = ROLE_TO_MOST_TASTY_BERRY_IDX[role]
 
     avatar_object = create_avatar_object(
-        player_idx=player_idx, most_tasty_berry_idx=most_tasty_berry_idx,
-        config=config)
+        player_idx=player_idx, most_tasty_berry_idx=most_tasty_berry_idx)
     avatar_objects.append(avatar_object)
 
-    overlay_object = create_colored_avatar_overlay(player_idx, config=config)
-    marking_object = create_marking_overlay(player_idx, config=config)
+    overlay_object = create_colored_avatar_overlay(player_idx)
+    marking_object = create_marking_overlay(player_idx)
     additional_objects.append(overlay_object)
     additional_objects.append(marking_object)
 
@@ -1150,8 +960,6 @@ def get_config():
   config.individual_observation_names = [
       "RGB",
       "READY_TO_SHOOT",
-      # Added by RST: Institutional observation (will be filtered in wrapper)
-      "PERMITTED_COLOR",
   ]
   config.global_observation_names = [
       "WORLD.RGB",
@@ -1162,9 +970,6 @@ def get_config():
   config.timestep_spec = specs.timestep({
       "RGB": specs.OBSERVATION["RGB"],
       "READY_TO_SHOOT": specs.OBSERVATION["READY_TO_SHOOT"],
-      # Added by RST: One-hot encoding of permitted color (3 elements)
-      "PERMITTED_COLOR": specs.OBSERVATION.get("PERMITTED_COLOR",
-          dm_env.specs.Array(shape=(3,), dtype=np.float64, name="PERMITTED_COLOR")),
       # Debug only (do not use the following observations in policies).
       "WORLD.RGB": specs.world_rgb(DEFAULT_ASCII_MAP, SPRITE_SIZE),
   })
@@ -1175,61 +980,16 @@ def get_config():
                                   "player_who_likes_green",
                                   "player_who_likes_blue",})
 
-  # Added by RST: Normative configuration flags
-  # Enable normative system (simple sanctions, immunity, institutional obs)
-  config.normative_gate = False  # False = base AH, True = normative version
-
-  # Treatment vs control (only applies when normative_gate=True)
-  config.enable_treatment_condition = False  # False = control, True = treatment
-
-  # Permitted color (1=RED, 2=GREEN, 3=BLUE)
-  config.permitted_color_index = 1
-
-  # Startup grace period for GREY (frames before GREY counts as violation)
-  config.startup_grey_grace = 25
-
-  # Immunity cooldown (frames after sanction before eligible again)
-  config.immunity_cooldown = 200
-
-  # Reward shaping parameters
-  config.alpha_in_reward = True  # Add +α for correct zaps (training only)
-  config.alpha_value = 5.0  # Bonus for correct zaps
-  config.beta_value = 5.0  # Penalty for mis-zaps
-  config.c_value = 0.5  # Cost per zap attempt
-  config.mis_zap_cost_beta_enabled = True  # Enable -β for mis-zaps
-  config.sanction_cost_c_enabled = True  # Enable -c for any zap
-
-  # Altar configuration (visual billboard, treatment only)
-  config.altar_coords = None  # Will auto-find floor cells or use default
-
-  # Added by RST: Resident vs ego designation
-  config.ego_index = None  # None = all-residents mode, 0 = training mode (agent 0 is ego)
-
-  # Added by RST: Builder function reference (will be set in build())
-  config.lab2d_settings_builder = build
-
   return config
 
 
-# Edited by RST: Modified to pass config to create functions and add altar
 def build(
     roles: Sequence[str],
     config: config_dict.ConfigDict,
 ) -> Mapping[str, Any]:
   """Build the allelopathic_harvest substrate given roles."""
   num_players = len(roles)
-  game_objects = create_avatar_and_associated_objects(roles=roles, config=config)
-
-  # Added by RST: Add altar object if treatment condition is enabled
-  if (config.get('normative_gate', False) and
-      config.get('enable_treatment_condition', False) and
-      config.get('altar_coords') is not None):
-    altar_position = config.altar_coords
-    altar_object = create_altar_object(
-        permitted_color_index=config.permitted_color_index,
-        position=altar_position)
-    game_objects.append(altar_object)
-
+  game_objects = create_avatar_and_associated_objects(roles=roles)
   # Build the rest of the substrate definition.
   substrate_definition = dict(
       levelName="allelopathic_harvest",
@@ -1241,7 +1001,7 @@ def build(
       simulation={
           "map": config.ascii_map,
           "gameObjects": game_objects,
-          "scene": create_scene(num_players, config=config),
+          "scene": create_scene(num_players),
           "prefabs": PREFABS,
           "charPrefabMap": CHAR_PREFAB_MAP,
           "playerPalettes": [PLAYER_COLOR_PALETTES[0]] * num_players,
