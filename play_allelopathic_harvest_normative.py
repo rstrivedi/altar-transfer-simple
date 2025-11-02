@@ -81,7 +81,12 @@ def format_event(event, controlled_player):
   if event_name == 'sanction':
     zapper_id = int(event_data.get('zapper_id', -1))
     zappee_id = int(event_data.get('zappee_id', -1))
-    if zapper_id != controlled_player and zappee_id != controlled_player:
+
+    # Added by RST: Lua uses 1-indexed, Python uses 0-indexed
+    # So convert controlled_player to Lua index for comparison
+    controlled_player_lua = controlled_player + 1
+
+    if zapper_id != controlled_player_lua and zappee_id != controlled_player_lua:
       return None  # Not involving controlled player, skip
 
     # Format sanction event nicely
@@ -94,7 +99,7 @@ def format_event(event, controlled_player):
 
     color_name = COLOR_NAMES.get(zappee_color, 'UNKNOWN')
 
-    if zapper_id == controlled_player:
+    if zapper_id == controlled_player_lua:
       # You zapped someone
       if immune:
         result = "TARGET WAS IMMUNE → fizzled (no effect)"
@@ -106,7 +111,9 @@ def format_event(event, controlled_player):
         result = "GRACE PERIOD → fizzled (first 25 frames)"
 
       violation_str = "target in VIOLATION" if was_violation else "target COMPLIANT"
-      return f"⚡ [t={t}] YOU ZAPPED P{zappee_id} ({color_name}) | {violation_str} | {result}"
+      # Convert Lua 1-indexed to Python 0-indexed for display
+      zappee_py = zappee_id - 1
+      return f"⚡ [t={t}] YOU ZAPPED P{zappee_py} ({color_name}) | {violation_str} | {result}"
     else:
       # You were zapped
       if immune:
@@ -117,7 +124,9 @@ def format_event(event, controlled_player):
         result = "Grace period → no damage"
 
       violation_str = "You were VIOLATING" if was_violation else "You were COMPLIANT"
-      return f"⚡ [t={t}] P{zapper_id} ZAPPED YOU ({color_name}) | {violation_str} | {result}"
+      # Convert Lua 1-indexed to Python 0-indexed for display
+      zapper_py = zapper_id - 1
+      return f"⚡ [t={t}] P{zapper_py} ZAPPED YOU ({color_name}) | {violation_str} | {result}"
 
   # Suppress other events (eating, replanting, zap) - too noisy
   # Only showing sanction events for clarity
@@ -196,7 +205,6 @@ def verbose_fn(timestep, player_index, current_player_index):
 def print_formatted_events(env):
   """Added by RST: Print formatted events for controlled player only."""
   if not hasattr(env, 'events'):
-    print("[DEBUG] env has no 'events' method")
     return
 
   events = env.events()
@@ -204,14 +212,10 @@ def print_formatted_events(env):
     return  # No events this timestep
 
   # Filter and format events for controlled player only
-  sanction_count = 0
   for event in events:
     event_name = event[0].decode() if isinstance(event[0], bytes) else event[0]
     if event_name == 'sanction':
-      sanction_count += 1
-      print(f"[DEBUG] Found sanction event, controlled player: {_current_controlled_player}")
       formatted = format_event(event, _current_controlled_player)
-      print(f"[DEBUG] Formatted result: {formatted}")
       if formatted:
         print(formatted)
         print()  # Blank line for readability
