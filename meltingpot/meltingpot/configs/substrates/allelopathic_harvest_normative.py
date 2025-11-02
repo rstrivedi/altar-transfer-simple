@@ -794,27 +794,33 @@ def create_scene(num_players: int):
 
 
 # Added by RST: Normative sanctioning overlay (replaces GraduatedSanctionsMarking)
-def create_sanctioning_overlay(player_idx: int) -> Dict[str, Any]:
-  """Create a normative sanctioning overlay object for this player."""
+def create_normative_overlay(player_idx: int) -> Dict[str, Any]:
+  """Create a single normative overlay with sanctioning and immunity tracking.
+
+  Added by RST: Combines sanctioning and immunity into one overlay to match
+  base game pattern (2 overlays per player instead of 3). Uses superOverlay
+  layer so SimpleZapSanctioning's onHit() receives beam hits before avatar.
+  """
   # Lua is 1-indexed.
   lua_idx = player_idx + 1
 
-  sanctioning_object = {
-      "name": "sanctioning_overlay",
+  normative_object = {
+      "name": "normative_overlay",
       "components": [
           {
               "component": "StateManager",
               "kwargs": {
-                  "initialState": "sanctioningWait",
+                  "initialState": "normativeWait",
                   "stateConfigs": [
                       # Active state (follows avatar)
-                      # Added by RST: Must be on superOverlay layer to be hit by zap beams
-                      {"state": "sanctioningActive",
+                      # Added by RST: superOverlay layer ensures onHit() is called
+                      # before avatar receives hit (highest priority in hit detection)
+                      {"state": "normativeActive",
                        "layer": "superOverlay",
-                       "groups": ["sanctioningOverlays"]},
+                       "groups": ["normativeOverlays"]},
                       # Inactive state (when zapped out)
-                      {"state": "sanctioningWait",
-                       "groups": ["sanctioningWaits"]},
+                      {"state": "normativeWait",
+                       "groups": ["normativeWaits"]},
                   ]
               }
           },
@@ -825,8 +831,8 @@ def create_sanctioning_overlay(player_idx: int) -> Dict[str, Any]:
               "component": "SimpleZapSanctioning",
               "kwargs": {
                   "playerIndex": lua_idx,
-                  "waitState": "sanctioningWait",
-                  "activeState": "sanctioningActive",
+                  "waitState": "normativeWait",
+                  "activeState": "normativeActive",
                   "hitName": "zapHit",
                   "costForSanctioning": NORMATIVE_PARAMS["costForSanctioning"],
                   "penaltyForSanctioned": NORMATIVE_PARAMS["penaltyForSanctioned"],
@@ -835,50 +841,18 @@ def create_sanctioning_overlay(player_idx: int) -> Dict[str, Any]:
                   "startupGreyGrace": NORMATIVE_PARAMS["startupGreyGrace"],
               }
           },
-      ]
-  }
-  return sanctioning_object
-
-
-# Added by RST: Immunity tracker overlay
-def create_immunity_overlay(player_idx: int) -> Dict[str, Any]:
-  """Create an immunity tracker overlay object for this player."""
-  # Lua is 1-indexed.
-  lua_idx = player_idx + 1
-
-  immunity_object = {
-      "name": "immunity_overlay",
-      "components": [
-          {
-              "component": "StateManager",
-              "kwargs": {
-                  "initialState": "immunityWait",
-                  "stateConfigs": [
-                      # Active state (follows avatar)
-                      {"state": "immunityActive",
-                       "layer": "logic",
-                       "groups": ["immunityOverlays"]},
-                      # Inactive state (when zapped out)
-                      {"state": "immunityWait",
-                       "groups": ["immunityWaits"]},
-                  ]
-              }
-          },
-          {
-              "component": "Transform",
-          },
           {
               "component": "ImmunityTracker",
               "kwargs": {
                   "playerIndex": lua_idx,
-                  "waitState": "immunityWait",
-                  "activeState": "immunityActive",
+                  "waitState": "normativeWait",
+                  "activeState": "normativeActive",
                   "immunityDuration": NORMATIVE_PARAMS["immunityDuration"],
               }
           },
       ]
   }
-  return immunity_object
+  return normative_object
 
 
 def create_colored_avatar_overlay(player_idx: int) -> Dict[str, Any]:
@@ -979,12 +953,13 @@ def create_avatar_and_associated_objects(
     avatar_objects.append(avatar_object)
 
     # Added by RST: Create normative overlays instead of GraduatedSanctionsMarking
+    # Now only 2 overlays (matching base game pattern):
+    # 1. colored_avatar_overlay - visual appearance (body color)
+    # 2. normative_overlay - sanctioning + immunity logic
     overlay_object = create_colored_avatar_overlay(player_idx)
-    sanctioning_overlay = create_sanctioning_overlay(player_idx)
-    immunity_overlay = create_immunity_overlay(player_idx)
+    normative_overlay = create_normative_overlay(player_idx)
     additional_objects.append(overlay_object)
-    additional_objects.append(sanctioning_overlay)
-    additional_objects.append(immunity_overlay)
+    additional_objects.append(normative_overlay)
 
   return avatar_objects + additional_objects
 

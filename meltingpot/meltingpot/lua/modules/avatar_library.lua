@@ -1232,15 +1232,16 @@ function SimpleZapSanctioning:onHit(hittingGameObject, hitName)
   local appliedMinus10 = not inGracePeriod and not isImmune and not tieBreak
 
   -- Record sanctioning event (record ALL attempts)
+  -- Added by RST: Convert booleans to numbers for events system
   events:add('sanction', 'dict',
              't', self._timestep,
              'zapper_id', hittingAvatar:getIndex(),
              'zappee_id', thisAvatar:getIndex(),
              'zappee_color', targetColorId,
-             'was_violation', isViolation,
-             'applied_minus10', appliedMinus10,
-             'immune', isImmune,
-             'tie_break', tieBreak)
+             'was_violation', isViolation and 1 or 0,
+             'applied_minus10', appliedMinus10 and 1 or 0,
+             'immune', isImmune and 1 or 0,
+             'tie_break', tieBreak and 1 or 0)
 
   -- If in grace period, fizzle without applying sanction
   if inGracePeriod then
