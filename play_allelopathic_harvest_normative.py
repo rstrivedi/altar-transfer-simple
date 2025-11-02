@@ -196,18 +196,25 @@ def verbose_fn(timestep, player_index, current_player_index):
 def print_formatted_events(env):
   """Added by RST: Print formatted events for controlled player only."""
   if not hasattr(env, 'events'):
+    print("[DEBUG] env has no 'events' method")
     return
 
   events = env.events()
   if not events:
-    return
+    return  # No events this timestep
 
   # Filter and format events for controlled player only
+  sanction_count = 0
   for event in events:
-    formatted = format_event(event, _current_controlled_player)
-    if formatted:
-      print(formatted)
-      print()  # Blank line for readability
+    event_name = event[0].decode() if isinstance(event[0], bytes) else event[0]
+    if event_name == 'sanction':
+      sanction_count += 1
+      print(f"[DEBUG] Found sanction event, controlled player: {_current_controlled_player}")
+      formatted = format_event(event, _current_controlled_player)
+      print(f"[DEBUG] Formatted result: {formatted}")
+      if formatted:
+        print(formatted)
+        print()  # Blank line for readability
 
 
 class VerboseWithEvents:
@@ -226,6 +233,7 @@ class VerboseWithEvents:
     verbose_fn(timestep, player_index, current_player_index)
 
     # Print formatted events after verbose output (only for controlled player)
+    # ONLY call once per timestep by checking if it's the last player in the loop
     if self.show_events and self.env and player_index == current_player_index:
       print_formatted_events(self.env)
 
