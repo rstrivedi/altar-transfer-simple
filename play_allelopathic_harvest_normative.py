@@ -233,9 +233,7 @@ class VerboseWithEvents:
     verbose_fn(timestep, player_index, current_player_index)
 
     # Print formatted events after verbose output (only for controlled player)
-    # ONLY call once per timestep by checking if it's the last player in the loop
     if self.show_events and self.env and player_index == current_player_index:
-      print(f"[DEBUG] Calling print_formatted_events, env={self.env is not None}")
       print_formatted_events(self.env)
 
 
@@ -295,14 +293,11 @@ def main():
 
   # Added by RST: Create verbose function with event support
   verbose_with_events = VerboseWithEvents(show_events=args.verbose)
-  print(f"[DEBUG] Created VerboseWithEvents wrapper, show_events={args.verbose}")
 
   # Added by RST: Create custom env_builder that captures env reference
   def builder_with_capture(*args_list, **kwargs):
     env = builder.builder(*args_list, **kwargs)
     verbose_with_events.env = env  # Capture env reference
-    print(f"[DEBUG] Captured env reference: {env}")
-    print(f"[DEBUG] env has events: {hasattr(env, 'events')}")
     return env
 
   # Pass custom builder directly to run_episode
