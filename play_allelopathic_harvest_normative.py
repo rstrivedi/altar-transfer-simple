@@ -175,23 +175,26 @@ def verbose_fn(timestep, player_index, current_player_index):
       is_sanction = False
       breakdown = ""
 
-      if abs(reward_delta - (-0.2)) < 0.01:
-        breakdown = "Zap cost -0.2 (fizzled or grace period)"
+      if abs(reward_delta - (-0.5)) < 0.01:
+        breakdown = "Zap cost -0.5 (fizzled or grace period)"
         is_sanction = True
-      elif abs(reward_delta - 0.3) < 0.01:
-        breakdown = "✓ Correct sanction: -0.2 (cost) +0.5 (alpha) = +0.3"
+      elif abs(reward_delta - 4.5) < 0.01:
+        breakdown = "✓ Correct sanction: -0.5 (cost) +5.0 (alpha) = +4.5"
         is_sanction = True
-      elif abs(reward_delta - (-0.7)) < 0.01:
-        breakdown = "✗ Incorrect sanction: -0.2 (cost) -0.5 (beta) = -0.7"
+      elif abs(reward_delta - (-5.5)) < 0.01:
+        breakdown = "✗ Incorrect sanction: -0.5 (cost) -5.0 (beta) = -5.5"
         is_sanction = True
       elif abs(reward_delta - (-10)) < 0.01:
         breakdown = "⚡ YOU WERE SANCTIONED: -10.0 penalty"
         is_sanction = True
-      elif abs(reward_delta - (-10.2)) < 0.01:
-        breakdown = "⚡ SANCTIONED while zapping: -10.0 (penalty) -0.2 (zap cost)"
+      elif abs(reward_delta - (-10.5)) < 0.01:
+        breakdown = "⚡ SANCTIONED while zapping: -10.0 (penalty) -0.5 (zap cost)"
         is_sanction = True
-      elif abs(reward_delta - (-9.7)) < 0.01:
-        breakdown = "⚡ SANCTIONED but your zap landed: -10.0 (penalty) +0.3 (your sanction)"
+      elif abs(reward_delta - (-5.5)) < 0.01:
+        breakdown = "⚡ SANCTIONED but your zap landed (correct): -10.0 + 4.5 = -5.5"
+        is_sanction = True
+      elif abs(reward_delta - (-15.5)) < 0.01:
+        breakdown = "⚡ SANCTIONED but your zap landed (incorrect): -10.0 - 5.5 = -15.5"
         is_sanction = True
 
       # Only print if it's sanction-related
@@ -278,9 +281,9 @@ def main():
   print("  - Grace period: First 50 frames (~6 sec, sanctions fizzle)")
   print("  - Immunity: 200 frames (~25 sec) after sanction OR until color change")
   print("\nREWARDS:")
-  print("  - Correct sanction (violation):  -0.2 (cost) + 0.5 (alpha) = +0.3")
-  print("  - Incorrect sanction (no viol.): -0.2 (cost) - 0.5 (beta)  = -0.7")
-  print("  - Fizzled zap (grace/immune):    -0.2 (cost only)")
+  print("  - Correct sanction (violation):  -0.5 (cost) + 5.0 (alpha) = +4.5")
+  print("  - Incorrect sanction (no viol.): -0.5 (cost) - 5.0 (beta)  = -5.5")
+  print("  - Fizzled zap (grace/immune):    -0.5 (cost only)")
   print("  - Target penalty (sanctioned):   -10.0")
   print("  - Tasty berry:                   +2.0")
   print("\nOUTPUT (Clean - only sanction events shown):")

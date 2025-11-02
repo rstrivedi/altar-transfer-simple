@@ -104,10 +104,10 @@ ROLE_TO_MOST_TASTY_BERRY_IDX = {
 
 # Added by RST: Normative sanctioning parameters
 NORMATIVE_PARAMS = {
-    "costForSanctioning": -0.2,  # c: cost to zapper
+    "costForSanctioning": -0.5,  # c: cost to zapper
     "penaltyForSanctioned": -10,  # penalty to target
-    "rewardForCorrectSanctioning": 0.5,  # alpha: reward for correct sanction
-    "penaltyForMisSanctioning": -0.5,  # beta: penalty for incorrect sanction
+    "rewardForCorrectSanctioning": 5.0,  # alpha: reward for correct sanction
+    "penaltyForMisSanctioning": -5.0,  # beta: penalty for incorrect sanction
     "immunityDuration": 200,  # frames
     "startupGreyGrace": 50,  # grace period frames at episode start (~6 sec at 8 fps)
     "defaultAltarColor": 1,  # 1=RED (Lua 1-indexed)
