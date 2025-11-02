@@ -108,7 +108,7 @@ def format_event(event, controlled_player):
       elif applied:
         result = "APPLIED -10 PENALTY to target"
       else:
-        result = "GRACE PERIOD → fizzled (first 25 frames)"
+        result = "GRACE PERIOD → fizzled (first 50 frames)"
 
       violation_str = "target in VIOLATION" if was_violation else "target COMPLIANT"
       # Convert Lua 1-indexed to Python 0-indexed for display
@@ -275,8 +275,8 @@ def main():
   print("\nMECHANICS:")
   print("  - Altar color = permitted body color")
   print("  - Violation = body_color ≠ altar_color")
-  print("  - Grace period: First 25 frames (~3 sec, sanctions fizzle)")
-  print("  - Immunity: 200 frames (~20 sec) after sanction OR until color change")
+  print("  - Grace period: First 50 frames (~6 sec, sanctions fizzle)")
+  print("  - Immunity: 200 frames (~25 sec) after sanction OR until color change")
   print("\nREWARDS:")
   print("  - Correct sanction (violation):  -0.2 (cost) + 0.5 (alpha) = +0.3")
   print("  - Incorrect sanction (no viol.): -0.2 (cost) - 0.5 (beta)  = -0.7")

@@ -109,7 +109,7 @@ NORMATIVE_PARAMS = {
     "rewardForCorrectSanctioning": 0.5,  # alpha: reward for correct sanction
     "penaltyForMisSanctioning": -0.5,  # beta: penalty for incorrect sanction
     "immunityDuration": 200,  # frames
-    "startupGreyGrace": 25,  # grace period frames at episode start
+    "startupGreyGrace": 50,  # grace period frames at episode start (~6 sec at 8 fps)
     "defaultAltarColor": 1,  # 1=RED (Lua 1-indexed)
 }
 
