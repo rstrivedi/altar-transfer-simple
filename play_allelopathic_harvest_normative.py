@@ -235,6 +235,7 @@ class VerboseWithEvents:
     # Print formatted events after verbose output (only for controlled player)
     # ONLY call once per timestep by checking if it's the last player in the loop
     if self.show_events and self.env and player_index == current_player_index:
+      print(f"[DEBUG] Calling print_formatted_events, env={self.env is not None}")
       print_formatted_events(self.env)
 
 
@@ -294,6 +295,7 @@ def main():
 
   # Added by RST: Create verbose function with event support
   verbose_with_events = VerboseWithEvents(show_events=args.verbose)
+  print(f"[DEBUG] Created VerboseWithEvents wrapper, show_events={args.verbose}")
 
   # Added by RST: Monkey-patch to inject env reference after creation
   # We'll wrap the env_builder to capture the env
@@ -302,6 +304,7 @@ def main():
   def builder_with_capture(*args_list, **kwargs):
     env = original_builder_fn(*args_list, **kwargs)
     verbose_with_events.env = env  # Capture env reference
+    print(f"[DEBUG] Captured env reference: {env}")
     return env
 
   # Temporarily replace builder
