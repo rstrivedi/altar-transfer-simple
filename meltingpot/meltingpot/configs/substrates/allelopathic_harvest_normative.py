@@ -808,8 +808,9 @@ def create_sanctioning_overlay(player_idx: int) -> Dict[str, Any]:
                   "initialState": "sanctioningWait",
                   "stateConfigs": [
                       # Active state (follows avatar)
+                      # Added by RST: Must be on superOverlay layer to be hit by zap beams
                       {"state": "sanctioningActive",
-                       "layer": "logic",
+                       "layer": "superOverlay",
                        "groups": ["sanctioningOverlays"]},
                       # Inactive state (when zapped out)
                       {"state": "sanctioningWait",
