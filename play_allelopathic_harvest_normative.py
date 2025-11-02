@@ -297,28 +297,21 @@ def main():
   verbose_with_events = VerboseWithEvents(show_events=args.verbose)
   print(f"[DEBUG] Created VerboseWithEvents wrapper, show_events={args.verbose}")
 
-  # Added by RST: Monkey-patch to inject env reference after creation
-  # We'll wrap the env_builder to capture the env
-  original_builder_fn = builder.builder
-
+  # Added by RST: Create custom env_builder that captures env reference
   def builder_with_capture(*args_list, **kwargs):
-    env = original_builder_fn(*args_list, **kwargs)
+    env = builder.builder(*args_list, **kwargs)
     verbose_with_events.env = env  # Capture env reference
     print(f"[DEBUG] Captured env reference: {env}")
+    print(f"[DEBUG] env has events: {hasattr(env, 'events')}")
     return env
 
-  # Temporarily replace builder
-  builder.builder = builder_with_capture
-
-  try:
-    level_playing_utils.run_episode(
-        args.observation, args.settings, _ACTION_MAP,
-        env_config, level_playing_utils.RenderType.PYGAME,
-        verbose_fn=verbose_with_events if args.verbose else None,
-        print_events=args.raw_events)  # Disabled by default, use --raw_events=True for debugging
-  finally:
-    # Restore original builder
-    builder.builder = original_builder_fn
+  # Pass custom builder directly to run_episode
+  level_playing_utils.run_episode(
+      args.observation, args.settings, _ACTION_MAP,
+      env_config, level_playing_utils.RenderType.PYGAME,
+      verbose_fn=verbose_with_events if args.verbose else None,
+      print_events=args.raw_events,  # Disabled by default, use --raw_events=True for debugging
+      env_builder=builder_with_capture)  # Pass custom builder explicitly
 
 
 if __name__ == '__main__':
