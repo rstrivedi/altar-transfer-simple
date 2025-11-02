@@ -96,61 +96,36 @@ def format_event(event, controlled_player):
 
     if zapper_id == controlled_player:
       # You zapped someone
-      result = []
       if immune:
-        result.append("TARGET IMMUNE (fizzled)")
+        result = "TARGET WAS IMMUNE → fizzled (no effect)"
       elif tie_break:
-        result.append("TIE-BREAK (fizzled)")
+        result = "TIE-BREAK → fizzled (someone else zapped them first this frame)"
       elif applied:
-        result.append("APPLIED -10 PENALTY")
+        result = "APPLIED -10 PENALTY to target"
       else:
-        result.append("fizzled (grace period)")
+        result = "GRACE PERIOD → fizzled (first 25 frames)"
 
-      violation_str = "VIOLATION" if was_violation else "not violation"
-      return f"  [t={t}] YOU ZAPPED P{zappee_id} ({color_name} body) → {violation_str}, {result[0]}"
+      violation_str = "target in VIOLATION" if was_violation else "target COMPLIANT"
+      return f"⚡ [t={t}] YOU ZAPPED P{zappee_id} ({color_name}) | {violation_str} | {result}"
     else:
       # You were zapped
-      result = []
       if immune:
-        result.append("you were IMMUNE (no damage)")
+        result = "You were IMMUNE → no damage"
       elif applied:
-        result.append("YOU TOOK -10 PENALTY")
+        result = "YOU TOOK -10 PENALTY"
       else:
-        result.append("fizzled")
+        result = "Grace period → no damage"
 
-      violation_str = "you were in VIOLATION" if was_violation else "you were compliant"
-      return f"  [t={t}] P{zapper_id} ZAPPED YOU ({color_name} body) → {violation_str}, {result[0]}"
+      violation_str = "You were VIOLATING" if was_violation else "You were COMPLIANT"
+      return f"⚡ [t={t}] P{zapper_id} ZAPPED YOU ({color_name}) | {violation_str} | {result}"
 
-  elif event_name == 'eating':
-    player_idx = int(event_data.get('player_index', -1))
-    if player_idx != controlled_player:
-      return None  # Not controlled player
-
-    berry_color = int(event_data.get('berry_color', 0))
-    color_name = COLOR_NAMES.get(berry_color, 'UNKNOWN')
-    return f"  🍓 Ate {color_name} berry"
-
-  elif event_name == 'replanting':
-    player_idx = int(event_data.get('player_index', -1))
-    if player_idx != controlled_player:
-      return None  # Not controlled player
-
-    source = int(event_data.get('source_berry', 0))
-    target = int(event_data.get('target_berry', 0))
-    source_name = COLOR_NAMES.get(source, 'UNKNOWN')
-    target_name = COLOR_NAMES.get(target, 'UNKNOWN')
-    return f"  🌱 Planted {target_name} (consumed {source_name})"
-
-  elif event_name == 'zap':
-    # Zap events are redundant with sanction events, skip
-    return None
-
-  # For other events, show minimal info
+  # Suppress other events (eating, replanting, zap) - too noisy
+  # Only showing sanction events for clarity
   return None
 
 
 def verbose_fn(timestep, player_index, current_player_index):
-  """Added by RST: Print altar color on player switch and rewards on change."""
+  """Added by RST: Print altar color on player switch. Sanction events shown separately."""
   global _last_player, _last_reward, _current_controlled_player
 
   # Track current controlled player for event filtering
@@ -178,7 +153,7 @@ def verbose_fn(timestep, player_index, current_player_index):
     if reward_key in timestep.observation:
       _last_reward[player_index] = timestep.observation[reward_key]
 
-  # Print reward changes
+  # Track reward changes but only print sanction-related ones
   reward_key = f'{lua_index}.REWARD'
   if reward_key in timestep.observation:
     current_reward = timestep.observation[reward_key]
@@ -187,35 +162,34 @@ def verbose_fn(timestep, player_index, current_player_index):
 
     reward_delta = current_reward - _last_reward[player_index]
     if reward_delta != 0:
-      # Show reward delta with explanation
+      # Only print sanction-related rewards (suppress berry eating noise)
+      is_sanction = False
       breakdown = ""
-      # Common reward patterns
-      if abs(reward_delta - 2.0) < 0.01:
-        breakdown = "ate tasty berry"
-      elif abs(reward_delta - 1.0) < 0.01:
-        breakdown = "ate berry"
-      elif abs(reward_delta - (-1.0)) < 0.01:
-        breakdown = "ate non-tasty berry"
-      elif abs(reward_delta - (-0.2)) < 0.01:
-        breakdown = "zap cost (fizzled/grace)"
-      elif abs(reward_delta - 0.3) < 0.01:
-        breakdown = "correct sanction! (c=-0.2, alpha=+0.5)"
-      elif abs(reward_delta - (-0.7)) < 0.01:
-        breakdown = "incorrect sanction (c=-0.2, beta=-0.5)"
-      elif abs(reward_delta - (-10)) < 0.01:
-        breakdown = "⚡ SANCTIONED! (target penalty)"
-      elif abs(reward_delta - (-10.2)) < 0.01:
-        breakdown = "⚡ SANCTIONED while zapping! (target=-10, c=-0.2)"
-      elif abs(reward_delta - (-9.7)) < 0.01:
-        breakdown = "⚡ SANCTIONED but zap hit! (target=-10, alpha=+0.3)"
-      # Berries eaten while other rewards
-      elif reward_delta > 0:
-        breakdown = f"positive (maybe berries + sanction bonus)"
-      else:
-        breakdown = f"negative (check actions)"
 
-      breakdown_str = f" ({breakdown})" if breakdown else ""
-      print(f"  💰 Reward: {reward_delta:+.1f}{breakdown_str} → Total: {current_reward:.1f}")
+      if abs(reward_delta - (-0.2)) < 0.01:
+        breakdown = "Zap cost -0.2 (fizzled or grace period)"
+        is_sanction = True
+      elif abs(reward_delta - 0.3) < 0.01:
+        breakdown = "✓ Correct sanction: -0.2 (cost) +0.5 (alpha) = +0.3"
+        is_sanction = True
+      elif abs(reward_delta - (-0.7)) < 0.01:
+        breakdown = "✗ Incorrect sanction: -0.2 (cost) -0.5 (beta) = -0.7"
+        is_sanction = True
+      elif abs(reward_delta - (-10)) < 0.01:
+        breakdown = "⚡ YOU WERE SANCTIONED: -10.0 penalty"
+        is_sanction = True
+      elif abs(reward_delta - (-10.2)) < 0.01:
+        breakdown = "⚡ SANCTIONED while zapping: -10.0 (penalty) -0.2 (zap cost)"
+        is_sanction = True
+      elif abs(reward_delta - (-9.7)) < 0.01:
+        breakdown = "⚡ SANCTIONED but your zap landed: -10.0 (penalty) +0.3 (your sanction)"
+        is_sanction = True
+
+      # Only print if it's sanction-related
+      if is_sanction:
+        print(f"\n💰 {breakdown}")
+        print(f"   Total reward: {current_reward:.1f}")
+
       _last_reward[player_index] = current_reward
 
 
@@ -233,6 +207,7 @@ def print_formatted_events(env):
     formatted = format_event(event, _current_controlled_player)
     if formatted:
       print(formatted)
+      print()  # Blank line for readability
 
 
 class VerboseWithEvents:
@@ -297,10 +272,12 @@ def main():
   print("  - Fizzled zap (grace/immune):    -0.2 (cost only)")
   print("  - Target penalty (sanctioned):   -10.0")
   print("  - Tasty berry:                   +2.0")
-  print("\nOUTPUT:")
+  print("\nOUTPUT (Clean - only sanction events shown):")
   print("  - Press TAB to see altar color for each player")
-  print("  - Rewards shown with breakdown when they change")
-  print("  - Use --raw_events=True to see all raw events (debug mode)")
+  print("  - Sanction events show: who zapped whom, violation status, result")
+  print("  - Sanction rewards shown with breakdown")
+  print("  - Berry eating NOT shown (reduces noise)")
+  print("  - Use --raw_events=True for all raw events (debug only)")
   print("="*70 + "\n")
 
   with config_dict.ConfigDict(env_config).unlocked() as env_config:
