@@ -57,27 +57,26 @@ COLOR_NAMES = {
 
 
 def verbose_fn(timestep, player_index, current_player_index):
-    """Added by RST: Print ALTAR observation for current player."""
-    # Only print for the currently controlled player
+    """Added by RST: Print ALTAR observation only when player switches."""
+    # Only print for the currently controlled player when they first switch to them
     if player_index != current_player_index:
         return
 
-    lua_index = player_index + 1
+    # Use a global to track last printed player to avoid spam
+    if not hasattr(verbose_fn, 'last_player'):
+        verbose_fn.last_player = -1
 
-    # Get ALTAR observation (scalar: 1=RED, 2=GREEN, 3=BLUE)
-    altar_obs_key = f'{lua_index}.ALTAR'
-    if altar_obs_key in timestep.observation:
-        altar_color_id = int(timestep.observation[altar_obs_key])
-        altar_color_name = COLOR_NAMES.get(altar_color_id, f"UNKNOWN({altar_color_id})")
-        print(f"Player {player_index} | Altar Color: {altar_color_name} ({altar_color_id})", end="")
+    # Only print when switching players
+    if verbose_fn.last_player != current_player_index:
+        verbose_fn.last_player = current_player_index
+        lua_index = player_index + 1
 
-    # Get READY_TO_SHOOT observation
-    ready_obs_key = f'{lua_index}.READY_TO_SHOOT'
-    if ready_obs_key in timestep.observation:
-        ready_to_shoot = timestep.observation[ready_obs_key]
-        print(f" | Ready to Zap: {bool(ready_to_shoot)}")
-    else:
-        print()  # newline
+        # Get ALTAR observation (scalar: 1=RED, 2=GREEN, 3=BLUE)
+        altar_obs_key = f'{lua_index}.ALTAR'
+        if altar_obs_key in timestep.observation:
+            altar_color_id = int(timestep.observation[altar_obs_key])
+            altar_color_name = COLOR_NAMES.get(altar_color_id, f"UNKNOWN({altar_color_id})")
+            print(f"\n>>> Now controlling Player {player_index} | Altar Color: {altar_color_name} ({altar_color_id}) <<<\n")
 
 
 def main():
@@ -93,9 +92,14 @@ def main():
     # Added by RST: Default verbose to True for normative testing
     parser.add_argument(
         '--verbose', type=bool, default=True, help='Print debug information')
-    # Added by RST: Default print_events to True to see sanction events
+    # Added by RST: Print events shows sanction events (can be noisy)
     parser.add_argument(
-        '--print_events', type=bool, default=True, help='Print all events (raw)')
+        '--print_events', type=bool, default=False, help='Print all events (raw)')
+    # Added by RST: Screen size for better visibility
+    parser.add_argument(
+        '--screen_width', type=int, default=1200, help='Screen width in pixels')
+    parser.add_argument(
+        '--screen_height', type=int, default=900, help='Screen height in pixels')
 
     args = parser.parse_args()
     env_module = environment_configs[args.level_name]
@@ -105,9 +109,33 @@ def main():
         roles = env_config.default_player_roles
         env_config.lab2d_settings = env_module.build(roles, env_config)
 
+    # Added by RST: Print controls at startup
+    print("\n" + "="*80)
+    print("ALLELOPATHIC HARVEST NORMATIVE - INTERACTIVE PLAY")
+    print("="*80)
+    print("\nKEY CONTROLS:")
+    print("  Movement:  W (forward), A (left), S (backward), D (right)")
+    print("  Turn:      Q (turn left), E (turn right)")
+    print("  Actions:   SPACE (zap/sanction)")
+    print("             1 (plant RED berry)")
+    print("             2 (plant GREEN berry)")
+    print("             3 (plant BLUE berry)")
+    print("  Switch:    TAB (switch between players)")
+    print("\nGAME MECHANICS:")
+    print("  - Altar Color: The permitted body color (shown when you switch players)")
+    print("  - Violation: Having body_color != altar_color")
+    print("  - Planting berries changes your body color")
+    print("  - Sanctions apply -10 to target, -0.2 cost to you")
+    print("  - Correct sanctions: +0.5, Incorrect: -0.5")
+    print("  - First 25 frames: Grace period (sanctions fizzle)")
+    print("  - Immunity: 200 frames after being sanctioned")
+    print("="*80 + "\n")
+
     level_playing_utils.run_episode(
         args.observation, args.settings, _ACTION_MAP,
         env_config, level_playing_utils.RenderType.PYGAME,
+        screen_width=args.screen_width,
+        screen_height=args.screen_height,
         verbose_fn=verbose_fn if args.verbose else None,
         print_events=args.print_events)
 
