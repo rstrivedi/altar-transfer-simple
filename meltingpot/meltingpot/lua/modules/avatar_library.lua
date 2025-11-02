@@ -1626,6 +1626,115 @@ function AltarObservation:addObservations(tileSet, world, observations)
 end
 
 
+--[[ Added by RST: ColorStateObservation component for resident agents.
+
+This component exposes all agents' body colors as an observation tensor.
+Residents use this to detect norm violations (agents with grey or wrong color).
+
+This component should be attached to resident avatar game objects.
+]]
+local ColorStateObservation = class.Class(component.Component)
+
+function ColorStateObservation:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('ColorStateObservation')},
+  })
+  ColorStateObservation.Base.__init__(self, kwargs)
+end
+
+function ColorStateObservation:addObservations(tileSet, world, observations)
+  local playerIndex = self.gameObject:getComponent('Avatar'):getIndex()
+  local sim = self.gameObject.simulation
+  local numPlayers = sim:getNumPlayers()
+
+  observations[#observations + 1] = {
+      name = tostring(playerIndex) .. '.AGENT_COLORS',
+      type = 'tensor.Int32Tensor',
+      shape = {numPlayers},
+      func = function(grid)
+        local colors = tensor.Int32Tensor(numPlayers):fill(0)
+        for i = 1, numPlayers do
+          local avatar = sim:getAvatarFromIndex(i)
+          local colorId = avatar:getComponent('ColorZapper').colorId
+          colors(i):val(colorId)
+        end
+        return colors
+      end
+  }
+end
+
+
+--[[ Added by RST: ImmunityStateObservation component for resident agents.
+
+This component exposes all agents' immunity status as an observation tensor.
+Residents use this to avoid re-sanctioning immune agents.
+
+This component should be attached to resident avatar game objects.
+]]
+local ImmunityStateObservation = class.Class(component.Component)
+
+function ImmunityStateObservation:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('ImmunityStateObservation')},
+  })
+  ImmunityStateObservation.Base.__init__(self, kwargs)
+end
+
+function ImmunityStateObservation:addObservations(tileSet, world, observations)
+  local playerIndex = self.gameObject:getComponent('Avatar'):getIndex()
+  local sim = self.gameObject.simulation
+  local numPlayers = sim:getNumPlayers()
+
+  observations[#observations + 1] = {
+      name = tostring(playerIndex) .. '.IMMUNITY_STATUS',
+      type = 'tensor.Int32Tensor',
+      shape = {numPlayers},
+      func = function(grid)
+        local immunity = tensor.Int32Tensor(numPlayers):fill(0)
+        for i = 1, numPlayers do
+          local avatar = sim:getAvatarFromIndex(i)
+          local immunityObjects = avatar:getComponent('Avatar'):getAllConnectedObjectsWithNamedComponent('ImmunityTracker')
+          if #immunityObjects > 0 then
+            local isImmune = immunityObjects[1]:getComponent('ImmunityTracker'):isImmune()
+            immunity(i):val(isImmune and 1 or 0)
+          end
+        end
+        return immunity
+      end
+  }
+end
+
+
+--[[ Added by RST: PlayerIndexObservation component for resident agents.
+
+This component exposes the player's own index as an observation.
+Residents use this to identify themselves in the AGENT_COLORS and IMMUNITY_STATUS arrays.
+
+This component should be attached to resident avatar game objects.
+]]
+local PlayerIndexObservation = class.Class(component.Component)
+
+function PlayerIndexObservation:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('PlayerIndexObservation')},
+  })
+  PlayerIndexObservation.Base.__init__(self, kwargs)
+end
+
+function PlayerIndexObservation:addObservations(tileSet, world, observations)
+  local playerIndex = self.gameObject:getComponent('Avatar'):getIndex()
+
+  observations[#observations + 1] = {
+      name = tostring(playerIndex) .. '.PLAYER_INDEX',
+      type = 'Doubles',
+      shape = {},
+      func = function(grid)
+        return playerIndex
+      end
+  }
+end
+
+
 local allComponents = {
     -- Components that are typically on the avatar itself.
     Avatar = Avatar,
@@ -1633,6 +1742,9 @@ local allComponents = {
     Zapper = Zapper,
     ReadyToShootObservation = ReadyToShootObservation,
     AltarObservation = AltarObservation,  -- Added by RST
+    ColorStateObservation = ColorStateObservation,  -- Added by RST
+    ImmunityStateObservation = ImmunityStateObservation,  -- Added by RST
+    PlayerIndexObservation = PlayerIndexObservation,  -- Added by RST
     PeriodicNeed = PeriodicNeed,
     Role = Role,
     AvatarIdsInViewObservation = AvatarIdsInViewObservation,

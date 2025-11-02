@@ -40,7 +40,7 @@ from ml_collections import config_dict
 PrefabConfig = game_object_utils.PrefabConfig
 
 # Warning: setting `_ENABLE_DEBUG_OBSERVATIONS = True` may cause slowdown.
-_ENABLE_DEBUG_OBSERVATIONS = False
+_ENABLE_DEBUG_OBSERVATIONS = True  # Edited by RST: Enable for BERRIES_BY_TYPE observation
 
 # How many different colors of berries.
 NUM_BERRY_TYPES = 3
@@ -536,17 +536,29 @@ def create_avatar_object(player_idx: int,
                   "beamRadius": 0,
                   "numColorZappers": NUM_BERRY_TYPES,
                   "beamColors": COLORS,
-                  # When `eatingSetsColorToNewborn` and `stochasticallyCryptic`
-                  # are both true than stochastically change back to the
-                  # newborn color after eating a berry with probability
-                  # inversely related to the monoculture fraction. So larger
-                  # monoculture fractions yield lower probabilities of changing
-                  # back to the newborn color.
-                  "stochasticallyCryptic": True,
+                  # Edited by RST: Use threshold-based grey color (eating 7+ berries without planting)
+                  # This catches free-riders (excessive consumption without contribution)
+                  # while allowing residents to forage normally
+                  "crypticConsumptionThreshold": 7,
+                  "stochasticallyCryptic": False,
               }
           },
       ]
   }
+  # Added by RST: Observations for resident agents (always enabled)
+  avatar_object["components"].append({
+      "component": "AvatarIdsInRangeToZapObservation",
+  })
+  avatar_object["components"].append({
+      "component": "ColorStateObservation",
+  })
+  avatar_object["components"].append({
+      "component": "ImmunityStateObservation",
+  })
+  avatar_object["components"].append({
+      "component": "PlayerIndexObservation",
+  })
+
   if _ENABLE_DEBUG_OBSERVATIONS:
     avatar_object["components"].append({
         "component": "LocationObserver",
@@ -575,9 +587,6 @@ def create_avatar_object(player_idx: int,
     })
     avatar_object["components"].append({
         "component": "AvatarIdsInViewObservation",
-    })
-    avatar_object["components"].append({
-        "component": "AvatarIdsInRangeToZapObservation",
     })
   return avatar_object
 
@@ -979,9 +988,14 @@ def get_config():
       "RGB",
       "READY_TO_SHOOT",
       "ALTAR",
+      "AVATAR_IDS_IN_RANGE_TO_ZAP",  # Added by RST: who can be zapped
+      "AGENT_COLORS",  # Added by RST: all agents' body colors
+      "IMMUNITY_STATUS",  # Added by RST: all agents' immunity status
+      "PLAYER_INDEX",  # Added by RST: this agent's index
   ]
   config.global_observation_names = [
       "WORLD.RGB",
+      "WORLD.BERRIES_BY_TYPE",  # Added by RST: for monoculture tracking
   ]
 
   # The specs of the environment (from a single-agent perspective).
@@ -990,8 +1004,14 @@ def get_config():
       "RGB": specs.OBSERVATION["RGB"],
       "READY_TO_SHOOT": specs.OBSERVATION["READY_TO_SHOOT"],
       "ALTAR": specs.OBSERVATION["ALTAR"],  # Added by RST: altar color observation
+      # Added by RST: Resident observations for sanctioning
+      "AVATAR_IDS_IN_RANGE_TO_ZAP": specs.int32(16, name="AVATAR_IDS_IN_RANGE_TO_ZAP"),  # Binary vector
+      "AGENT_COLORS": specs.int32(16, name="AGENT_COLORS"),  # All agents' body colors
+      "IMMUNITY_STATUS": specs.int32(16, name="IMMUNITY_STATUS"),  # All agents' immunity
+      "PLAYER_INDEX": specs.float64(name="PLAYER_INDEX"),  # This agent's index
       # Debug only (do not use the following observations in policies).
       "WORLD.RGB": specs.world_rgb(DEFAULT_ASCII_MAP, SPRITE_SIZE),
+      "WORLD.BERRIES_BY_TYPE": specs.int32(NUM_BERRY_TYPES, name="BERRIES_BY_TYPE"),  # Added by RST: (red, green, blue) counts
   })
 
   # The roles assigned to each player.

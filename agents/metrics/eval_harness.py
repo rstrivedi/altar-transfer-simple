@@ -63,8 +63,8 @@ from meltingpot.configs.substrates import allelopathic_harvest__open as allelopa
 
 from agents.envs.normative_observation_filter import NormativeObservationFilter
 from agents.envs.resident_wrapper import ResidentWrapper
-from agents.residents.info_extractor import ResidentInfoExtractor
-from agents.residents.scripted_residents import ResidentController
+# Added by RST: Removed old imports (ResidentController, ResidentInfoExtractor)
+# New implementation uses ResidentPolicy via ResidentWrapper
 from agents.metrics.recorder import MetricsRecorder
 from agents.metrics.aggregators import compute_episode_metrics, aggregate_distributional_metrics
 from agents.metrics.schema import EpisodeMetrics, RunMetrics, aggregate_run_metrics, DistributionalRunMetrics
@@ -213,20 +213,12 @@ def _run_baseline_episodes(
         roles=roles)
 
     # Wrap with ResidentWrapper (all 16 are residents)
-    extractor = ResidentInfoExtractor(
-        num_players=16,
-        permitted_color_index=config['permitted_color_index'],
-        startup_grey_grace=config['startup_grey_grace'])
-
-    controller = ResidentController()
-    controller.reset(seed=seed)
-
+    # Added by RST: Updated to use new ResidentWrapper API (uses ResidentPolicy)
     env = ResidentWrapper(
         env=base_env,
         resident_indices=list(range(16)),  # All 16
         ego_index=None,  # No ego
-        resident_controller=controller,
-        info_extractor=extractor)
+        seed=seed)
 
     # Initialize recorder for agent 0 (acting as resident)
     recorder = MetricsRecorder(
@@ -322,20 +314,12 @@ def _run_ego_episodes(
         enable_treatment_condition=enable_treatment)
 
     # Wrap with ResidentWrapper (ego=0, residents=1-15)
-    extractor = ResidentInfoExtractor(
-        num_players=16,
-        permitted_color_index=config['permitted_color_index'],
-        startup_grey_grace=config['startup_grey_grace'])
-
-    controller = ResidentController()
-    controller.reset(seed=seed)
-
+    # Added by RST: Updated to use new ResidentWrapper API (uses ResidentPolicy)
     env = ResidentWrapper(
         env=env_filtered,
         resident_indices=list(range(1, 16)),  # Agents 1-15
         ego_index=0,  # Agent 0 is ego
-        resident_controller=controller,
-        info_extractor=extractor)
+        seed=seed)
 
     # Initialize recorder
     recorder = MetricsRecorder(

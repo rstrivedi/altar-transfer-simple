@@ -1,28 +1,30 @@
-# Added by RST: Wrapper to integrate scripted residents with environment
+# Added by RST: Wrapper to integrate policy-based residents with environment
 """Wrapper that automatically acts scripted residents while allowing ego control.
 
-In training mode (ego_index=0), agent 0 is controlled by the learner while
-agents 1-15 act according to the scripted ResidentController.
+This is the NEW implementation using policy.Policy interface.
 
-In baseline mode (ego_index=None), all agents act according to ResidentController.
+In training mode (ego_index=0), agent 0 is controlled by the learner while
+agents 1-15 act according to ResidentPolicy.
+
+In baseline mode (ego_index=None), all agents act according to ResidentPolicy.
 """
 
-from typing import List, Optional, Sequence, Mapping
+from typing import Dict, List, Optional
 
 import dm_env
 import numpy as np
 
-from agents.residents.info_extractor import ResidentInfoExtractor
-from agents.residents.scripted_residents import ResidentController
-from agents.utils.event_parser import parse_events
+from agents.residents.resident_policy import ResidentPolicy
 
 
 class ResidentWrapper:
   """Wrapper that manages resident agent actions automatically.
 
   This wrapper intercepts environment interactions and fills in actions for
-  resident agents using the ResidentController. In training mode, only ego's
+  resident agents using ResidentPolicy instances. In training mode, only ego's
   action comes from the external agent; residents act automatically.
+
+  NEW: Uses policy.Policy interface, NO event parsing.
   """
 
   def __init__(
@@ -30,22 +32,18 @@ class ResidentWrapper:
       env,
       resident_indices: List[int],
       ego_index: Optional[int],
-      resident_controller: ResidentController,
-      info_extractor: ResidentInfoExtractor):
+      seed: Optional[int] = None):
     """Initialize the ResidentWrapper.
 
     Args:
       env: Base dmlab2d environment to wrap.
       resident_indices: List of agent indices that are residents (0-indexed).
       ego_index: Index of ego agent, or None if all agents are residents.
-      resident_controller: ResidentController instance for scripted behavior.
-      info_extractor: ResidentInfoExtractor instance for parsing state.
+      seed: Random seed for resident policies.
     """
     self._env = env
     self._resident_indices = resident_indices
     self._ego_index = ego_index
-    self._resident_controller = resident_controller
-    self._info_extractor = info_extractor
 
     # Determine number of players from environment
     self._num_players = len(env.observation_spec())
@@ -75,13 +73,24 @@ class ResidentWrapper:
             f"Expected {self._num_players - 1} residents + 1 ego, "
             f"but got {len(resident_indices)} residents")
 
+    # Create one ResidentPolicy instance per resident agent
+    # Added by RST: Create policy instances with different seeds for diversity
+    self._resident_policies: Dict[int, ResidentPolicy] = {}
+    self._resident_states: Dict[int, any] = {}
+
+    rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
+    for agent_id in resident_indices:
+      # Use different seed for each resident for behavioral diversity
+      policy_seed = rng.randint(0, 2**31 - 1)
+      policy = ResidentPolicy(seed=policy_seed)
+      self._resident_policies[agent_id] = policy
+      self._resident_states[agent_id] = policy.initial_state()
+
     # Store last timestep for accessing observations
     self._last_timestep = None
-    self._last_info = None  # Store info used for last action selection
-    self._last_events = None  # Store events from last step
 
   def reset(self, *args, **kwargs) -> dm_env.TimeStep:
-    """Reset environment and resident controller.
+    """Reset environment and resident policies.
 
     Args:
       *args: Forwarded to base environment.
@@ -90,11 +99,13 @@ class ResidentWrapper:
     Returns:
       Initial timestep from environment.
     """
-    # Reset info extractor
-    self._info_extractor.reset()
-
     # Reset environment
     timestep = self._env.reset(*args, **kwargs)
+
+    # Reset all resident policy states
+    # Added by RST: Reset policy state on episode start
+    for agent_id, policy in self._resident_policies.items():
+      self._resident_states[agent_id] = policy.initial_state()
 
     # Store timestep for future step() calls
     self._last_timestep = timestep
@@ -124,24 +135,26 @@ class ResidentWrapper:
       if ego_action is None:
         raise ValueError(f"ego_action required for ego_index={self._ego_index}")
 
-    # Get observations from last timestep and current events
-    observations = self._last_timestep.observation
-    events = parse_events(self._env.events())
-
-    # Extract info for residents
-    info = self._info_extractor.extract_info(observations, events)
-    self._last_info = info  # Store for debugging/testing
-
     # Build action list for all agents
+    # Added by RST: Get actions from policies using observations ONLY
     actions = []
     for agent_id in range(self._num_players):
       if agent_id == self._ego_index:
         # Ego agent: use provided action
         actions.append(ego_action)
       elif agent_id in self._resident_indices:
-        # Resident agent: use controller
-        resident_action = self._resident_controller.act(agent_id, info)
-        actions.append(resident_action)
+        # Resident agent: use policy
+        # Extract per-agent timestep from multi-agent observation
+        agent_timestep = self._extract_agent_timestep(self._last_timestep, agent_id)
+
+        # Get action from policy
+        policy = self._resident_policies[agent_id]
+        prev_state = self._resident_states[agent_id]
+        action, new_state = policy.step(agent_timestep, prev_state)
+
+        # Update state
+        self._resident_states[agent_id] = new_state
+        actions.append(action)
       else:
         # Should not happen if validation is correct
         raise ValueError(f"Agent {agent_id} is neither ego nor resident")
@@ -149,11 +162,40 @@ class ResidentWrapper:
     # Step environment with all actions
     timestep = self._env.step(actions)
 
-    # Store timestep and events for next step() call and for debugging/testing
+    # Store timestep for next step() call
     self._last_timestep = timestep
-    self._last_events = self._env.events()  # Events generated by the actions just taken
 
     return timestep
+
+  def _extract_agent_timestep(self, timestep: dm_env.TimeStep, agent_id: int) -> dm_env.TimeStep:
+    """Extract per-agent timestep from multi-agent observation.
+
+    MeltingPot environments return observations as a list (one per agent).
+    This extracts the observation for a specific agent and wraps it in a
+    dm_env.TimeStep for the policy.
+
+    Args:
+      timestep: Multi-agent timestep from environment.
+      agent_id: Agent index (0-indexed).
+
+    Returns:
+      Per-agent timestep with single observation dict.
+    """
+    # Added by RST: Extract agent's observation from list
+    observations = timestep.observation
+    if isinstance(observations, list):
+      agent_obs = observations[agent_id]
+    else:
+      # Single observation dict (shouldn't happen in multi-agent env)
+      agent_obs = observations
+
+    # Create per-agent timestep
+    return dm_env.TimeStep(
+        step_type=timestep.step_type,
+        reward=timestep.reward,
+        discount=timestep.discount,
+        observation=agent_obs
+    )
 
   def observation_spec(self):
     """Forward to wrapped environment."""
@@ -164,24 +206,11 @@ class ResidentWrapper:
     return self._env.action_spec()
 
   def close(self):
-    """Forward to wrapped environment."""
+    """Close all policies and wrapped environment."""
+    # Added by RST: Close all policies
+    for policy in self._resident_policies.values():
+      policy.close()
     return self._env.close()
-
-  def get_last_info(self):
-    """Get the info dict used for the last action selection.
-
-    Returns:
-      Info dict from last step() call, or None if step() hasn't been called yet.
-    """
-    return self._last_info
-
-  def get_last_events(self):
-    """Get the events generated by the last step().
-
-    Returns:
-      Events from last step() call, or None if step() hasn't been called yet.
-    """
-    return self._last_events
 
   def __getattr__(self, name):
     """Forward all other attributes to wrapped environment."""

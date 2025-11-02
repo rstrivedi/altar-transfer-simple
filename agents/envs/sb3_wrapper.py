@@ -3,7 +3,7 @@
 
 This wrapper:
 - Exposes agent 0 (ego) as a Gymnasium environment for SB3 PPO training
-- Steps agents 1-15 (residents) automatically via ResidentController
+- Steps agents 1-15 (residents) automatically via ResidentPolicy (observation-based)
 - Returns observations: RGB, READY_TO_SHOOT, TIMESTEP, [PERMITTED_COLOR in treatment]
 - Returns rewards: r_train = r_env + alpha - beta - c (alpha for training bonus)
 - Integrates with MetricsRecorder for telemetry capture
@@ -42,8 +42,8 @@ from meltingpot.configs.substrates import allelopathic_harvest__open as allelopa
 
 from agents.envs.normative_observation_filter import NormativeObservationFilter
 from agents.envs.resident_wrapper import ResidentWrapper
-from agents.residents.info_extractor import ResidentInfoExtractor
-from agents.residents.scripted_residents import ResidentController
+# Added by RST: Removed old imports (ResidentController, ResidentInfoExtractor)
+# New implementation uses ResidentPolicy via ResidentWrapper
 from agents.metrics.recorder import MetricsRecorder
 from agents.utils.event_parser import parse_events
 
@@ -126,12 +126,8 @@ class AllelopathicHarvestGymEnv(gym.Env):
         self._base_env = None
         self._env = None  # ResidentWrapper
 
-        # Resident controller and info extractor
-        self._resident_controller = ResidentController()
-        self._info_extractor = ResidentInfoExtractor(
-            num_players=self.num_players,
-            permitted_color_index=config['permitted_color_index'],
-            startup_grey_grace=config.get('startup_grey_grace', 25))
+        # Added by RST: Removed old ResidentController and ResidentInfoExtractor
+        # New implementation uses ResidentPolicy directly via ResidentWrapper
 
         # Metrics recorder
         if self.enable_telemetry:
@@ -244,12 +240,8 @@ class AllelopathicHarvestGymEnv(gym.Env):
             self.config['permitted_color_index'] = self._current_community_idx
             self.env_config.permitted_color_index = self._current_community_idx
 
-            # Recreate info extractor with new community
-            self._info_extractor = ResidentInfoExtractor(
-                num_players=self.num_players,
-                permitted_color_index=self._current_community_idx,
-                startup_grey_grace=self.config.get('startup_grey_grace', 25),
-            )
+            # Added by RST: Removed recreation of ResidentInfoExtractor
+            # New implementation doesn't need this
 
             # Recreate recorder with new community
             if self.enable_telemetry:
@@ -262,11 +254,8 @@ class AllelopathicHarvestGymEnv(gym.Env):
                     community_idx=self._current_community_idx,
                 )
 
-        # Reset resident controller
-        self._resident_controller.reset(seed=self._seed)
-
-        # Reset info extractor
-        self._info_extractor.reset()
+        # Added by RST: Removed reset calls for ResidentController and ResidentInfoExtractor
+        # New implementation doesn't need these
 
         # Reset metrics recorder
         if self._recorder is not None:
@@ -284,12 +273,12 @@ class AllelopathicHarvestGymEnv(gym.Env):
             enable_treatment_condition=self.enable_treatment)
 
         # Wrap with ResidentWrapper
+        # Added by RST: Updated to use new ResidentWrapper API (uses ResidentPolicy)
         self._env = ResidentWrapper(
             env=env_filtered,
             resident_indices=self.resident_indices,
             ego_index=self.ego_index,
-            resident_controller=self._resident_controller,
-            info_extractor=self._info_extractor)
+            seed=self._seed)
 
         # Reset wrapped environment
         dmlab_timestep = self._env.reset()
