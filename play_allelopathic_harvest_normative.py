@@ -27,9 +27,9 @@ Press --print_events=True to see sanction events.
 import argparse
 import json
 
-from meltingpot import builder
 from meltingpot.configs.substrates import allelopathic_harvest_normative__open
 from meltingpot.human_players import level_playing_utils
+from meltingpot.utils.substrates import builder
 from ml_collections import config_dict
 
 environment_configs = {
