@@ -1030,6 +1030,19 @@ def build(
   """Build the allelopathic_harvest substrate given roles."""
   num_players = len(roles)
   game_objects = create_avatar_and_associated_objects(roles=roles)
+
+  # Create scene with default altar color
+  scene = create_scene(num_players)
+
+  # Added by RST: Override Altar color from config (for multi-community support)
+  # This enables single-community GREEN/BLUE and Phase 5 multi-community training
+  # where each episode may sample a different community (RED/GREEN/BLUE)
+  if hasattr(config, 'permitted_color_index') and config.permitted_color_index is not None:
+      for component in scene["components"]:
+          if component.get("component") == "Altar":
+              component["kwargs"]["altarColor"] = config.permitted_color_index
+              break
+
   # Build the rest of the substrate definition.
   substrate_definition = dict(
       levelName="allelopathic_harvest",
@@ -1041,7 +1054,7 @@ def build(
       simulation={
           "map": config.ascii_map,
           "gameObjects": game_objects,
-          "scene": create_scene(num_players),
+          "scene": scene,  # Use modified scene
           "prefabs": PREFABS,
           "charPrefabMap": CHAR_PREFAB_MAP,
           "playerPalettes": [PLAYER_COLOR_PALETTES[0]] * num_players,

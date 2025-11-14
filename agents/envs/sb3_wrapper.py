@@ -4,11 +4,14 @@
 This wrapper:
 - Exposes agent 0 (ego) as a Gymnasium environment for SB3 PPO training
 - Steps agents 1-15 (residents) automatically via ResidentPolicy (observation-based)
-- Returns observations: RGB, READY_TO_SHOOT, TIMESTEP, [PERMITTED_COLOR in treatment]
+- Returns observations: RGB, READY_TO_SHOOT, TIMESTEP, [permitted_color in treatment]
 - Returns rewards: r_train = r_env + alpha - beta - c (alpha for training bonus)
 - Integrates with MetricsRecorder for telemetry capture
-- Supports treatment (with PERMITTED_COLOR) and control (without) arms
+- Supports treatment (with ALTAR→permitted_color) and control (without) arms
 - Supports multi-community mode (Phase 5) for distributional competence training
+
+Note: Substrate provides ALTAR observation (scalar altar color index), which we
+convert to one-hot 'permitted_color' for the policy.
 
 Usage:
     # Phase 4: Single-community training
@@ -38,14 +41,13 @@ import gymnasium as gym
 from gymnasium import spaces
 
 import meltingpot.substrate as substrate
-from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
+from meltingpot.configs.substrates import allelopathic_harvest_normative__open as allelopathic_harvest
 
 from agents.envs.normative_observation_filter import NormativeObservationFilter
 from agents.envs.resident_wrapper import ResidentWrapper
 # Added by RST: Removed old imports (ResidentController, ResidentInfoExtractor)
 # New implementation uses ResidentPolicy via ResidentWrapper
 from agents.metrics.recorder import MetricsRecorder
-from agents.utils.event_parser import parse_events
 
 
 class AllelopathicHarvestGymEnv(gym.Env):
@@ -69,7 +71,7 @@ class AllelopathicHarvestGymEnv(gym.Env):
         """Initialize the Gymnasium environment.
 
         Args:
-            arm: 'treatment' or 'control' (controls PERMITTED_COLOR observation exposure)
+            arm: 'treatment' or 'control' (controls permitted_color observation exposure)
             config: Configuration dict with keys:
                 - permitted_color_index: int (1=RED, 2=GREEN, 3=BLUE)
                   (ignored if multi_community_mode=True, sampled randomly instead)
@@ -109,18 +111,19 @@ class AllelopathicHarvestGymEnv(gym.Env):
         self.resident_indices = list(range(1, self.num_players))
         self.episode_len = config.get('episode_timesteps', 2000)
 
-        # Build substrate config
-        self.env_config = allelopathic_harvest.get_config()
-        with self.env_config.unlocked():
-            self.env_config.normative_gate = True
-            self.env_config.permitted_color_index = config['permitted_color_index']
-            self.env_config.startup_grey_grace = config.get('startup_grey_grace', 25)
-            self.env_config.ego_index = self.ego_index
-            self.env_config.enable_treatment_condition = self.enable_treatment
-            self.env_config.episode_timesteps = self.episode_len
+        # Multi-community mode setup (Phase 5)
+        self.multi_community_mode = multi_community_mode
+        if self.multi_community_mode:
+            # Communities: 1=RED, 2=GREEN, 3=BLUE
+            self.communities = [1, 2, 3]
+            # Per-worker RNG for independent sampling
+            self._community_rng = np.random.RandomState(seed)
+            # Current community tracking
+            self._current_community_idx = None
+            self._current_community_name = None
 
-            if self.enable_treatment:
-                self.env_config.altar_coords = config.get('altar_coords', (5, 15))
+        # Don't create ConfigDict in __init__ - will create fresh in reset() to avoid pickle issues
+        self.env_config = None
 
         # Build base environment (will be rebuilt on reset with proper seed)
         self._base_env = None
@@ -147,17 +150,6 @@ class AllelopathicHarvestGymEnv(gym.Env):
         if seed is not None:
             self.seed(seed)
 
-        # Multi-community mode setup (Phase 5)
-        self.multi_community_mode = multi_community_mode
-        if self.multi_community_mode:
-            # Communities: 1=RED, 2=GREEN, 3=BLUE
-            self.communities = [1, 2, 3]
-            # Per-worker RNG for independent sampling
-            self._community_rng = np.random.RandomState(seed)
-            # Current community tracking
-            self._current_community_idx = None
-            self._current_community_name = None
-
         # Define observation space
         self.observation_space = self._make_observation_space()
 
@@ -180,12 +172,35 @@ class AllelopathicHarvestGymEnv(gym.Env):
             'immunity_cooldown': 200,
         }
 
+    def _build_env_config(self, permitted_color_index: int):
+        """Build substrate config with given permitted_color_index.
+
+        Args:
+            permitted_color_index: 1=RED, 2=GREEN, 3=BLUE
+
+        Returns:
+            ConfigDict for substrate
+        """
+        env_config = allelopathic_harvest.get_config()
+        with env_config.unlocked():
+            env_config.normative_gate = True
+            env_config.permitted_color_index = permitted_color_index
+            env_config.startup_grey_grace = self.config.get('startup_grey_grace', 25)
+            env_config.ego_index = self.ego_index
+            env_config.enable_treatment_condition = self.enable_treatment
+            env_config.episode_timesteps = self.episode_len
+
+            if self.enable_treatment:
+                env_config.altar_coords = self.config.get('altar_coords', (5, 15))
+
+        return env_config
+
     def _make_observation_space(self) -> spaces.Dict:
         """Build observation space based on arm (treatment vs control).
 
         Base: RGB + READY_TO_SHOOT
         Optional: + TIMESTEP (if include_timestep=True)
-        Treatment only: + PERMITTED_COLOR
+        Treatment only: + permitted_color (converted from ALTAR observation)
         """
         obs_dict = {
             'rgb': spaces.Box(low=0, high=255, shape=(88, 88, 3), dtype=np.uint8),
@@ -205,8 +220,8 @@ class AllelopathicHarvestGymEnv(gym.Env):
     def seed(self, seed: Optional[int] = None):
         """Set random seed."""
         self._seed = seed
-        if self._resident_controller is not None:
-            self._resident_controller.reset(seed=seed)
+        # Seed is passed to substrate and ResidentWrapper during reset()
+        # No need to do anything here
 
     def reset(
         self,
@@ -230,18 +245,17 @@ class AllelopathicHarvestGymEnv(gym.Env):
         # Reset timestep counter
         self._current_timestep = 0
 
-        # Sample community if multi-community mode (Phase 5)
+        # Build/sample env config (ConfigDict doesn't survive pickling, so create fresh each reset)
         if self.multi_community_mode:
-            # Randomly sample community (independent per worker)
-            self._current_community_idx = self._community_rng.choice(self.communities)
+            # Multi-community: Randomly sample community (independent per worker)
+            # Cast to int to avoid numpy.int64 vs int type mismatch with ConfigDict
+            self._current_community_idx = int(self._community_rng.choice(self.communities))
             self._current_community_name = {1: 'RED', 2: 'GREEN', 3: 'BLUE'}[self._current_community_idx]
 
-            # Update config with sampled community
+            # Build fresh config for this community
+            self.env_config = self._build_env_config(self._current_community_idx)
+            # Update wrapper config tracking
             self.config['permitted_color_index'] = self._current_community_idx
-            self.env_config.permitted_color_index = self._current_community_idx
-
-            # Added by RST: Removed recreation of ResidentInfoExtractor
-            # New implementation doesn't need this
 
             # Recreate recorder with new community
             if self.enable_telemetry:
@@ -253,6 +267,9 @@ class AllelopathicHarvestGymEnv(gym.Env):
                     community_tag=self._current_community_name,
                     community_idx=self._current_community_idx,
                 )
+        else:
+            # Single-community: Build config fresh (avoid pickle corruption)
+            self.env_config = self._build_env_config(self.config['permitted_color_index'])
 
         # Added by RST: Removed reset calls for ResidentController and ResidentInfoExtractor
         # New implementation doesn't need these
@@ -261,16 +278,29 @@ class AllelopathicHarvestGymEnv(gym.Env):
         if self._recorder is not None:
             self._recorder.reset()
 
-        # Build base environment
+        # Build base environment (following altar-transfer/agents/sa/wrappers/environment_wrapper.py)
         roles = ["default"] * self.num_players
-        self._base_env = substrate.build_from_config(
-            config=self.env_config,
-            roles=roles)
+
+        # Build substrate using direct module API (not build_from_config - that breaks with pickling)
+        from meltingpot.utils.substrates import substrate as mp_substrate_utils
+
+        # Call the substrate module's build function directly to get lab2d_settings
+        substrate_definition = allelopathic_harvest.build(roles=roles, config=self.env_config)
+
+        # Build the substrate from lab2d_settings
+        self._base_env = mp_substrate_utils.build_substrate(
+            lab2d_settings=substrate_definition,
+            individual_observations=self.env_config.individual_observation_names,
+            global_observations=self.env_config.global_observation_names,
+            action_table=self.env_config.action_set,
+        )
 
         # Wrap with observation filter (treatment vs control)
+        # Added by RST: Pass ego_index so filter only affects ego, not residents
         env_filtered = NormativeObservationFilter(
             self._base_env,
-            enable_treatment_condition=self.enable_treatment)
+            enable_treatment_condition=self.enable_treatment,
+            ego_index=self.ego_index)
 
         # Wrap with ResidentWrapper
         # Added by RST: Updated to use new ResidentWrapper API (uses ResidentPolicy)
@@ -318,7 +348,49 @@ class AllelopathicHarvestGymEnv(gym.Env):
         self._last_dmlab_timestep = dmlab_timestep
 
         # Get events from base environment
-        events = parse_events(self._base_env.events())
+        # dmlab2d events are tuples: (event_name, event_data_list)
+        # event_data_list is a flat list: [b'dict', b'key1', value1, b'key2', value2, ...]
+        # Convert to dict format with 'name' key for recorder
+        raw_events = self._base_env.events()
+        events = []
+        for event in raw_events:
+            # # Debug: Print first 3 sanction events to see raw format
+            # is_sanction = (isinstance(event, tuple) and len(event) > 0 and event[0] == 'sanction') or \
+            #               (isinstance(event, dict) and event.get('name') == 'sanction')
+            # if is_sanction and self._debug_sanction_count < 3:
+            #     print(f"DEBUG sb3_wrapper t={self._current_timestep}: Raw sanction event: type={type(event)}, len={len(event) if isinstance(event, tuple) else 'N/A'}")
+            #     print(f"  Full event: {event}")
+            #     self._debug_sanction_count += 1
+
+            if isinstance(event, tuple) and len(event) >= 2:
+                # Convert (event_name, data_list) to {'name': event_name, **data}
+                event_dict = {'name': event[0]}
+
+                # Parse flat list format: [b'dict', b'key1', val1, b'key2', val2, ...]
+                if isinstance(event[1], list) and len(event[1]) > 0:
+                    data_list = event[1]
+                    # Skip first element (b'dict' type marker)
+                    # Then parse pairs: [b'key', value, b'key', value, ...]
+                    i = 1
+                    while i < len(data_list) - 1:
+                        key = data_list[i]
+                        value = data_list[i + 1]
+                        # Decode bytes to string for key
+                        if isinstance(key, bytes):
+                            key = key.decode('utf-8')
+                        # Extract scalar from numpy array
+                        if hasattr(value, 'item'):
+                            value = value.item()
+                        event_dict[key] = value
+                        i += 2
+                elif isinstance(event[1], dict):
+                    # Fallback for dict format (if it ever happens)
+                    event_dict.update(event[1])
+
+                events.append(event_dict)
+            elif isinstance(event, dict):
+                # Already in dict format
+                events.append(event)
 
         # Record telemetry if enabled
         if self._recorder is not None:
@@ -352,6 +424,22 @@ class AllelopathicHarvestGymEnv(gym.Env):
         if self._recorder is not None:
             info['r_eval'] = self._recorder.get_r_eval()
             info['ego_body_color'] = self._recorder.get_ego_body_color()
+
+            # Add episode summary when episode ends (for SB3 callbacks and logging)
+            if truncated:
+                # Get berry counts from WORLD observations
+                world_obs = dmlab_timestep.observation[0]  # WORLD observations are usually in agent 0
+                berries_by_type = world_obs.get('WORLD.BERRIES_BY_TYPE', np.zeros(3))
+
+                # Get episode summary from recorder (includes sanction metrics)
+                episode_summary = self._recorder.get_episode_summary()
+
+                # Override berry counts with values from WORLD observations (more reliable)
+                episode_summary['berries_planted_red'] = int(berries_by_type[0]) if len(berries_by_type) > 0 else 0
+                episode_summary['berries_planted_green'] = int(berries_by_type[1]) if len(berries_by_type) > 1 else 0
+                episode_summary['berries_planted_blue'] = int(berries_by_type[2]) if len(berries_by_type) > 2 else 0
+
+                info['episode'] = episode_summary
 
         # Add community tag if multi-community mode (Phase 5)
         if self.multi_community_mode:
@@ -388,10 +476,14 @@ class AllelopathicHarvestGymEnv(gym.Env):
             timestep_norm = np.array([self._current_timestep / self.episode_len], dtype=np.float32)
             obs['timestep'] = timestep_norm
 
-        # Add PERMITTED_COLOR if treatment arm
+        # Edited by RST: Add ALTAR observation (permitted color) if treatment arm
+        # ALTAR is scalar (1=RED, 2=GREEN, 3=BLUE in Lua 1-indexed), convert to one-hot
         if self.enable_treatment:
-            permitted_color_onehot = ego_obs_raw['PERMITTED_COLOR']  # (3,) float64
-            obs['permitted_color'] = permitted_color_onehot.astype(np.float32)
+            altar_color_index = int(ego_obs_raw['ALTAR'])  # Scalar: 1, 2, or 3 (Lua 1-indexed)
+            # Convert to one-hot (3,) float32: [1,0,0]=RED, [0,1,0]=GREEN, [0,0,1]=BLUE
+            permitted_color_onehot = np.zeros(3, dtype=np.float32)
+            permitted_color_onehot[altar_color_index - 1] = 1.0  # -1 for Python 0-indexing
+            obs['permitted_color'] = permitted_color_onehot
 
         return obs
 

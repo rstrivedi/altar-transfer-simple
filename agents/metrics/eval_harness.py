@@ -3,11 +3,11 @@
 
 This module implements deterministic evaluation with:
 1. Resident-in-ego-slot baseline (all residents)
-2. Treatment arm (ego + residents, with PERMITTED_COLOR observation)
-3. Control arm (ego + residents, without PERMITTED_COLOR observation)
+2. Treatment arm (ego + residents, with permitted_color observation from ALTAR)
+3. Control arm (ego + residents, without permitted_color observation)
 
 All three conditions use identical seeds and physics. The ONLY difference between
-treatment and control is the PERMITTED_COLOR observation (institutional signal).
+treatment and control is the permitted_color observation (institutional signal from ALTAR).
 
 TWO USAGE MODES:
 
@@ -59,7 +59,7 @@ from typing import List, Dict, Callable, Optional, Tuple
 import numpy as np
 
 import meltingpot.substrate as substrate
-from meltingpot.configs.substrates import allelopathic_harvest__open as allelopathic_harvest
+from meltingpot.configs.substrates import allelopathic_harvest_normative__open as allelopathic_harvest
 
 from agents.envs.normative_observation_filter import NormativeObservationFilter
 from agents.envs.resident_wrapper import ResidentWrapper
@@ -118,8 +118,8 @@ def run_evaluation(
   baseline_r_evals = [ep.r_eval for ep in baseline_episodes]
   baseline_sanctions = [ep.num_minus10_received for ep in baseline_episodes]
 
-  # === Run treatment (ego + residents, with PERMITTED_COLOR) ===
-  print(f"\n=== Running TREATMENT (ego + residents + PERMITTED_COLOR): {num_episodes} episodes ===")
+  # === Run treatment (ego + residents, with permitted_color) ===
+  print(f"\n=== Running TREATMENT (ego + residents + permitted_color): {num_episodes} episodes ===")
   treatment_episodes = _run_ego_episodes(
       ego_policy=ego_policy,
       config=config,
@@ -133,8 +133,8 @@ def run_evaluation(
       video_output_dir=video_output_dir,
   )
 
-  # === Run control (ego + residents, without PERMITTED_COLOR) ===
-  print(f"\n=== Running CONTROL (ego + residents, no PERMITTED_COLOR): {num_episodes} episodes ===")
+  # === Run control (ego + residents, without permitted_color) ===
+  print(f"\n=== Running CONTROL (ego + residents, no permitted_color): {num_episodes} episodes ===")
   control_episodes = _run_ego_episodes(
       ego_policy=ego_policy,
       config=config,
@@ -161,14 +161,14 @@ def run_evaluation(
   print(f"  R_eval: {baseline_run.r_eval_mean:.2f} ± {baseline_run.r_eval_std:.2f}")
   print(f"  Sanctions: {np.mean([ep.num_minus10_received for ep in baseline_episodes]):.1f}")
 
-  print(f"\nTREATMENT (ego + residents + PERMITTED_COLOR):")
+  print(f"\nTREATMENT (ego + residents + permitted_color):")
   print(f"  R_eval: {treatment_run.r_eval_mean:.2f} ± {treatment_run.r_eval_std:.2f}")
   print(f"  Value-gap: {treatment_run.value_gap_mean:.2f} ± {treatment_run.value_gap_std:.2f}")
   print(f"  Sanction-regret: {treatment_run.sanction_regret_mean:.2f} ± {treatment_run.sanction_regret_std:.2f}")
   print(f"  Compliance: {treatment_run.compliance_pct_mean:.1f}%")
   print(f"  Monoculture: {treatment_run.monoculture_fraction_mean:.3f}")
 
-  print(f"\nCONTROL (ego + residents, no PERMITTED_COLOR):")
+  print(f"\nCONTROL (ego + residents, no permitted_color):")
   print(f"  R_eval: {control_run.r_eval_mean:.2f} ± {control_run.r_eval_std:.2f}")
   print(f"  Value-gap: {control_run.value_gap_mean:.2f} ± {control_run.value_gap_std:.2f}")
   print(f"  Sanction-regret: {control_run.sanction_regret_mean:.2f} ± {control_run.sanction_regret_std:.2f}")
@@ -199,9 +199,9 @@ def _run_baseline_episodes(
     print(f"  Baseline episode {i+1}/{num_episodes} (seed={seed})")
 
     # Build environment with ego_index=None (all residents)
+    # Edited by RST: Use normative substrate directly, no normative_gate needed
     env_config = allelopathic_harvest.get_config()
     with env_config.unlocked():
-        env_config.normative_gate = True
         env_config.permitted_color_index = config['permitted_color_index']
         env_config.startup_grey_grace = config['startup_grey_grace']
         env_config.ego_index = None  # All residents
@@ -233,12 +233,12 @@ def _run_baseline_episodes(
     recorder.reset()
 
     for step in range(config.get('episode_timesteps', 2000)):
-      # Get agent 0's action from controller
-      info = extractor.extract_info(timestep.observation, events)
-      agent_0_action = controller.act(0, info)
+      # Edited by RST: Get agent 0's action from wrapper (ResidentWrapper now stores last actions)
+      # In baseline mode, all agents are residents, we track agent 0 as "ego"
+      agent_0_action = env.get_last_action(0) if step > 0 else 0  # First step has no action yet
 
       # Record step (track agent 0 as "ego" for baseline)
-      recorder.record_step(step, timestep, events, agent_0_action)
+      recorder.record_step(step, timestep, events, agent_0_action if agent_0_action is not None else 0)
 
       # Step environment (ResidentWrapper handles all actions)
       timestep = env.step(ego_action=None)  # No ego, all residents

@@ -21,11 +21,28 @@ Usage:
 
 import os
 from typing import Dict, Optional, Any
+from collections import defaultdict
 import numpy as np
 import torch
 
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecNormalize
+
+# Rich console for pretty printing
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+
+# tqdm for progress bar
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
 
 # Edited by RST: Import distributional evaluation for Phase 5
 from agents.metrics.eval_harness import run_evaluation, run_distributional_evaluation
@@ -78,6 +95,15 @@ class WandbLoggingCallback(BaseCallback):
         self.tags = tags or [f'phase{phase}', arm] + (['multi-community'] if multi_community else [])
         self.wandb_run = None
 
+        # Console output for nice metrics display
+        self.console = Console() if HAS_RICH else None
+        self.episode_data = defaultdict(list)  # Track episodes per community
+        self.last_report_timestep = 0
+        self.report_iteration = 0
+
+        # Added by RST: tqdm progress bar for training
+        self.pbar = None
+
     def _init_callback(self) -> None:
         """Initialize W&B run."""
         try:
@@ -119,12 +145,52 @@ class WandbLoggingCallback(BaseCallback):
                 print("WARNING: wandb not installed. W&B logging disabled.")
             self.wandb_run = None
 
+    def _on_training_start(self) -> None:
+        """Initialize tqdm progress bar at training start."""
+        # Added by RST: Initialize tqdm progress bar with colors
+        if HAS_TQDM:
+            # Account for resumed training by subtracting already completed timesteps
+            total_timesteps = self.locals.get("total_timesteps", 0)
+            already_done = self.model.num_timesteps
+            remaining_timesteps = total_timesteps - already_done
+
+            self.pbar = tqdm(
+                total=remaining_timesteps,
+                desc=f"Training {self.arm}",
+                unit="steps",
+                colour='green',
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+            )
+
     def _on_step(self) -> bool:
         """Called at each training step.
 
         Returns:
             True to continue training
         """
+        # Added by RST: Update tqdm progress bar
+        # _on_step is called once per env.step(), which executes num_envs steps in parallel
+        if self.pbar is not None:
+            self.pbar.update(self.training_env.num_envs)
+
+        # Track episode completions per community (for multi-community mode)
+        infos = self.locals.get('infos', [])
+        for info in infos:
+            if 'episode' in info and isinstance(info['episode'], dict):
+                # Get community tag if available (Phase 5)
+                community_tag = info.get('community_tag', 'single')
+                self.episode_data[community_tag].append(info['episode'].copy())
+
+        # Print console report every ~2048 steps (matches PPO reporting interval)
+        n_envs = self.training_env.num_envs if hasattr(self, 'training_env') else 8
+        report_interval = 2048 * n_envs
+        if self.num_timesteps >= self.last_report_timestep + report_interval:
+            self._print_console_report()
+            self.last_report_timestep = self.num_timesteps
+            self.report_iteration += 1
+            # Clear episode data after reporting
+            self.episode_data.clear()
+
         if self.wandb_run is None:
             return True
 
@@ -253,6 +319,10 @@ class WandbLoggingCallback(BaseCallback):
                 if hasattr(buffer, 'actions'):
                     actions = buffer.actions[-1000:]  # Last 1000 actions
 
+                    # Convert to torch tensor if numpy array
+                    if isinstance(actions, np.ndarray):
+                        actions = torch.from_numpy(actions)
+
                     # Compute action histogram
                     action_counts = torch.bincount(actions.flatten().long(), minlength=11)
                     action_probs = action_counts.float() / action_counts.sum()
@@ -276,8 +346,111 @@ class WandbLoggingCallback(BaseCallback):
             if self.verbose > 0:
                 print(f"Warning: Could not log action distribution: {e}")
 
+    def _print_console_report(self):
+        """Print nice formatted metrics table to console and log to W&B."""
+        if not HAS_RICH or self.console is None:
+            return
+
+        total_timesteps = self.config['training']['total_timesteps']
+
+        # Create table
+        table = Table(
+            title=f"Training Progress - Iteration {self.report_iteration} (Steps: {self.num_timesteps:,}/{total_timesteps:,})"
+        )
+
+        # Add columns
+        table.add_column("Community", style="cyan", no_wrap=True)
+        table.add_column("Episodes", style="white")
+        table.add_column("Mean Reward ± Std", style="green")
+        table.add_column("Collective R", style="yellow")
+        table.add_column("Sanctions", style="red")
+        table.add_column("Berry Distribution", style="magenta")
+
+        # Process each community
+        for community_tag in sorted(self.episode_data.keys()):
+            episodes = self.episode_data[community_tag]
+
+            if episodes:
+                # Compute metrics
+                # Mean reward = ego's natural reward (r - alpha, excluding sanctioning bonuses)
+                # r = R_env + alpha - beta - c
+                # r - alpha = R_env - beta - c (natural reward)
+                episode_rewards = [ep.get('r', 0) - ep.get('alpha', 0) for ep in episodes]
+                mean_reward = np.mean(episode_rewards)
+                std_reward = np.std(episode_rewards)
+
+                # Collective reward = sum of all agents' total rewards
+                collective_rewards = [ep.get('collective_reward', 0) for ep in episodes]
+                mean_collective = np.mean(collective_rewards)
+
+                # Sanction metrics
+                times_sanctioned = np.mean([ep.get('times_sanctioned', 0) for ep in episodes])
+                times_sanctioned_others = np.mean([ep.get('times_sanctioned_others', 0) for ep in episodes])
+                sanction_str = f"Recv:{times_sanctioned:.1f} Give:{times_sanctioned_others:.1f}"
+
+                # Berry metrics
+                berries_red = np.mean([ep.get('berries_planted_red', 0) for ep in episodes])
+                berries_green = np.mean([ep.get('berries_planted_green', 0) for ep in episodes])
+                berries_blue = np.mean([ep.get('berries_planted_blue', 0) for ep in episodes])
+
+                total_berries = berries_red + berries_green + berries_blue
+                if total_berries > 0:
+                    red_pct = berries_red / total_berries * 100
+                    green_pct = berries_green / total_berries * 100
+                    blue_pct = berries_blue / total_berries * 100
+                    berry_dist = f"R:{red_pct:.0f}% G:{green_pct:.0f}% B:{blue_pct:.0f}%"
+                    # Added by RST: Compute monoculture fraction (max berry type / total)
+                    monoculture_fraction = max(berries_red, berries_green, berries_blue) / total_berries
+                else:
+                    berry_dist = "No berries"
+                    red_pct = 0.0
+                    green_pct = 0.0
+                    blue_pct = 0.0
+                    monoculture_fraction = 0.0
+
+                # Log to W&B per community
+                if self.wandb_run is not None:
+                    prefix = f"episode/{community_tag}"
+                    self.wandb_run.log({
+                        f"{prefix}/mean_reward": mean_reward,
+                        f"{prefix}/std_reward": std_reward,
+                        f"{prefix}/mean_collective_reward": mean_collective,
+                        f"{prefix}/mean_r_eval": np.mean([ep.get('r_eval', 0) for ep in episodes]),
+                        f"{prefix}/mean_berries_planted_red": berries_red,
+                        f"{prefix}/mean_berries_planted_green": berries_green,
+                        f"{prefix}/mean_berries_planted_blue": berries_blue,
+                        # Added by RST: Berry distribution percentages
+                        f"{prefix}/berry_pct_red": red_pct,
+                        f"{prefix}/berry_pct_green": green_pct,
+                        f"{prefix}/berry_pct_blue": blue_pct,
+                        f"{prefix}/monoculture_fraction": monoculture_fraction,
+                        f"{prefix}/mean_berries_consumed_red": np.mean([ep.get('berries_consumed_red', 0) for ep in episodes]),
+                        f"{prefix}/mean_berries_consumed_green": np.mean([ep.get('berries_consumed_green', 0) for ep in episodes]),
+                        f"{prefix}/mean_berries_consumed_blue": np.mean([ep.get('berries_consumed_blue', 0) for ep in episodes]),
+                        f"{prefix}/mean_times_sanctioned": times_sanctioned,
+                        f"{prefix}/mean_times_sanctioned_others": times_sanctioned_others,
+                        f"{prefix}/episode_count": len(episodes),
+                    }, step=self.num_timesteps)
+
+                # Add row to console table
+                table.add_row(
+                    community_tag,
+                    str(len(episodes)),
+                    f"{mean_reward:.2f} ± {std_reward:.2f}",
+                    f"{mean_collective:.1f}",
+                    sanction_str,
+                    berry_dist,
+                )
+
+        # Print table
+        self.console.print(table)
+
     def _on_training_end(self) -> None:
         """Called at the end of training."""
+        # Added by RST: Close tqdm progress bar
+        if self.pbar is not None:
+            self.pbar.close()
+
         if self.wandb_run is not None:
             self.wandb_run.finish()
 
@@ -351,6 +524,155 @@ class CheckpointCallback(BaseCallback):
         return True
 
 
+class BestModelCallback(BaseCallback):
+    """Callback for saving best model based on evaluation performance.
+
+    Tracks mean episode reward during training and saves the best-performing
+    model checkpoint. This ensures you always have the peak-performance model,
+    even if training degrades later.
+
+    Args:
+        checkpoint_dir: Directory to save best model
+        eval_freq: Evaluate and check for best model every N steps (default: 100k)
+        n_eval_episodes: Number of episodes for evaluation (default: 10)
+        deterministic: Use deterministic policy for evaluation (default: True)
+        verbose: Verbosity level
+    """
+
+    def __init__(
+        self,
+        checkpoint_dir: str = './checkpoints',
+        eval_freq: int = 100_000,
+        n_eval_episodes: int = 10,
+        deterministic: bool = True,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose)
+        self.checkpoint_dir = checkpoint_dir
+        self.eval_freq = eval_freq
+        self.n_eval_episodes = n_eval_episodes
+        self.deterministic = deterministic
+        self.best_mean_reward = -np.inf
+        self.best_timestep = 0
+
+    def _init_callback(self) -> None:
+        """Initialize callback."""
+        # Create checkpoint directory
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        if self.verbose > 0:
+            print(f"Best model will be saved to {self.checkpoint_dir}/best_model.zip")
+            print(f"Evaluation every {self.eval_freq} steps with {self.n_eval_episodes} episodes")
+
+    def _on_step(self) -> bool:
+        """Called at each training step.
+
+        Returns:
+            True to continue training
+        """
+        # Evaluate every eval_freq steps
+        if self.n_calls % self.eval_freq == 0:
+            # Collect episode rewards from recent rollouts
+            # Use info dicts from VecEnv which contain episode stats
+            episode_rewards = []
+            episode_lengths = []
+
+            # Get recent episodes from the rollout buffer via callback locals
+            # The 'infos' in locals contain episode data when episodes complete
+            # We'll use a simpler approach: collect from training env's episode buffer
+
+            # Alternative: Use training env's episode statistics
+            # SB3 tracks episode rewards in the VecEnv wrapper
+            if hasattr(self.training_env, 'get_attr'):
+                # Try to get episode rewards from env attributes
+                try:
+                    # Get recent episode data from the buffer
+                    # This is a heuristic - collect last N completed episodes
+                    # from the vectorized environments
+
+                    # Simpler approach: evaluate on training env directly
+                    # Run N evaluation episodes
+                    for _ in range(self.n_eval_episodes):
+                        obs = self.training_env.reset()
+                        done = False
+                        episode_reward = 0.0
+                        episode_length = 0
+
+                        while not np.all(done):
+                            # Get action from current policy
+                            action, _ = self.model.predict(obs, deterministic=self.deterministic)
+                            obs, reward, done, info = self.training_env.step(action)
+
+                            # Accumulate reward (for vectorized env, sum across envs)
+                            episode_reward += np.mean(reward)
+                            episode_length += 1
+
+                            # Check if any episodes completed
+                            for idx, d in enumerate(done):
+                                if d and 'episode' in info[idx]:
+                                    # Use actual episode reward from info
+                                    ep_info = info[idx]['episode']
+                                    if 'r' in ep_info:
+                                        episode_rewards.append(ep_info['r'])
+                                    if 'l' in ep_info:
+                                        episode_lengths.append(ep_info['l'])
+
+                            # Break if we have enough episodes
+                            if len(episode_rewards) >= self.n_eval_episodes:
+                                break
+
+                        if len(episode_rewards) >= self.n_eval_episodes:
+                            break
+
+                except Exception as e:
+                    if self.verbose > 0:
+                        print(f"Warning: Could not evaluate model: {e}")
+                    return True
+
+            # Compute mean reward
+            if len(episode_rewards) > 0:
+                mean_reward = np.mean(episode_rewards)
+                std_reward = np.std(episode_rewards)
+
+                if self.verbose > 0:
+                    print(f"\n{'='*60}")
+                    print(f"Eval at step {self.num_timesteps}:")
+                    print(f"  Mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+                    print(f"  Best so far: {self.best_mean_reward:.2f} (at step {self.best_timestep})")
+
+                # Check if this is the best model
+                if mean_reward > self.best_mean_reward:
+                    self.best_mean_reward = mean_reward
+                    self.best_timestep = self.num_timesteps
+
+                    if self.verbose > 0:
+                        print(f"  🏆 New best model! Saving...")
+                    print(f"{'='*60}\n")
+
+                    # Save best model
+                    best_model_path = os.path.join(self.checkpoint_dir, 'best_model')
+                    self.model.save(best_model_path)
+
+                    # Save VecNormalize stats
+                    if isinstance(self.model.env, VecNormalize):
+                        vec_normalize_path = os.path.join(self.checkpoint_dir, 'best_vec_normalize.pkl')
+                        self.model.env.save(vec_normalize_path)
+
+                    # Save metadata about best model
+                    metadata_path = os.path.join(self.checkpoint_dir, 'best_model_info.txt')
+                    with open(metadata_path, 'w') as f:
+                        f.write(f"Best model checkpoint\n")
+                        f.write(f"Timestep: {self.best_timestep}\n")
+                        f.write(f"Mean reward: {self.best_mean_reward:.4f}\n")
+                        f.write(f"Std reward: {std_reward:.4f}\n")
+                        f.write(f"Num eval episodes: {len(episode_rewards)}\n")
+
+                elif self.verbose > 0:
+                    print(f"{'='*60}\n")
+
+        return True
+
+
 class EvalCallback(BaseCallback):
     """Callback for running Phase 3 evaluation harness during training.
 
@@ -396,6 +718,16 @@ class EvalCallback(BaseCallback):
             # Edited by RST: Phase 5 needs 3x episodes (one per community)
             n_seeds = n_eval_episodes * 3 if multi_community else n_eval_episodes
             self.eval_seeds = rng.randint(0, 1_000_000, size=n_seeds).tolist()
+
+        # Added by RST: Track best models according to different criteria
+        self.best_reward = -np.inf
+        self.best_reward_step = 0
+        self.best_value_gap = np.inf  # Lower is better
+        self.best_value_gap_step = 0
+        self.best_sanction_regret = np.inf  # Lower is better
+        self.best_sanction_regret_step = 0
+        self.best_combined = np.inf  # Lower is better (value_gap + sanction_regret)
+        self.best_combined_step = 0
 
     def _init_callback(self) -> None:
         """Initialize callback."""
@@ -488,6 +820,124 @@ class EvalCallback(BaseCallback):
 
         return True
 
+    def _check_and_save_best_models(
+        self,
+        reward: float,
+        value_gap: float,
+        sanction_regret: float,
+        combined_score: float,
+    ):
+        """Check if current model is best according to any criterion and save.
+
+        Added by RST: Multi-criteria best model tracking.
+
+        Args:
+            reward: Mean evaluation reward (higher is better)
+            value_gap: Mean value gap (lower is better)
+            sanction_regret: Mean sanction regret (lower is better)
+            combined_score: Combined score = value_gap + sanction_regret (lower is better)
+        """
+        # Track which models were updated
+        updated = []
+
+        # 1. Check best reward (highest)
+        if reward > self.best_reward:
+            self.best_reward = reward
+            self.best_reward_step = self.num_timesteps
+            self._save_best_model(
+                'reward',
+                reward,
+                value_gap,
+                sanction_regret,
+                f"Highest evaluation reward: {reward:.4f}"
+            )
+            updated.append('reward')
+
+        # 2. Check best value gap (lowest)
+        if value_gap < self.best_value_gap:
+            self.best_value_gap = value_gap
+            self.best_value_gap_step = self.num_timesteps
+            self._save_best_model(
+                'value_gap',
+                reward,
+                value_gap,
+                sanction_regret,
+                f"Lowest value gap: {value_gap:.4f}"
+            )
+            updated.append('value_gap')
+
+        # 3. Check best sanction regret (lowest)
+        if sanction_regret < self.best_sanction_regret:
+            self.best_sanction_regret = sanction_regret
+            self.best_sanction_regret_step = self.num_timesteps
+            self._save_best_model(
+                'sanction_regret',
+                reward,
+                value_gap,
+                sanction_regret,
+                f"Lowest sanction regret: {sanction_regret:.4f}"
+            )
+            updated.append('sanction_regret')
+
+        # 4. Check best combined (lowest)
+        if combined_score < self.best_combined:
+            self.best_combined = combined_score
+            self.best_combined_step = self.num_timesteps
+            self._save_best_model(
+                'combined',
+                reward,
+                value_gap,
+                sanction_regret,
+                f"Lowest combined score: {combined_score:.4f} (ΔV + SR)"
+            )
+            updated.append('combined')
+
+        # Print summary of updates
+        if updated and self.verbose > 0:
+            print(f"\n{'='*60}")
+            print(f"🏆 New best model(s) at step {self.num_timesteps}:")
+            for criterion in updated:
+                print(f"  • {criterion}")
+            print(f"{'='*60}\n")
+
+    def _save_best_model(
+        self,
+        criterion: str,
+        reward: float,
+        value_gap: float,
+        sanction_regret: float,
+        description: str,
+    ):
+        """Save best model checkpoint for a specific criterion.
+
+        Args:
+            criterion: One of 'reward', 'value_gap', 'sanction_regret', 'combined'
+            reward: Current evaluation reward
+            value_gap: Current value gap
+            sanction_regret: Current sanction regret
+            description: Human-readable description of why this is best
+        """
+        # Save model
+        model_path = os.path.join(self.checkpoint_dir, f'best_model_{criterion}')
+        self.model.save(model_path)
+
+        # Save VecNormalize stats if present
+        if isinstance(self.model.env, VecNormalize):
+            vec_normalize_path = os.path.join(self.checkpoint_dir, f'best_vec_normalize_{criterion}.pkl')
+            self.model.env.save(vec_normalize_path)
+
+        # Save metadata
+        metadata_path = os.path.join(self.checkpoint_dir, f'best_model_{criterion}_info.txt')
+        with open(metadata_path, 'w') as f:
+            f.write(f"Best model checkpoint: {criterion}\n")
+            f.write(f"Timestep: {self.num_timesteps}\n")
+            f.write(f"Description: {description}\n")
+            f.write(f"\nMetrics at this checkpoint:\n")
+            f.write(f"  Evaluation reward: {reward:.4f}\n")
+            f.write(f"  Value gap: {value_gap:.4f}\n")
+            f.write(f"  Sanction regret: {sanction_regret:.4f}\n")
+            f.write(f"  Combined (ΔV + SR): {value_gap + sanction_regret:.4f}\n")
+
     def _log_distributional_metrics(
         self,
         ego_dist: DistributionalRunMetrics,
@@ -548,6 +998,15 @@ class EvalCallback(BaseCallback):
         except ImportError:
             pass  # W&B not available
 
+        # Added by RST: Track and save best models based on different criteria
+        # Use distributional averages for Phase 5
+        avg_reward = ego_dist.avg_r_eval
+        avg_value_gap = ego_dist.avg_value_gap
+        avg_sanction_regret = ego_dist.avg_sanction_regret
+        combined_score = avg_value_gap + avg_sanction_regret
+
+        self._check_and_save_best_models(avg_reward, avg_value_gap, avg_sanction_regret, combined_score)
+
     def _log_single_community_metrics(self, results: Dict):
         """Log Phase 4 single-community metrics to W&B.
 
@@ -589,6 +1048,16 @@ class EvalCallback(BaseCallback):
 
         except ImportError:
             pass  # W&B not available
+
+        # Added by RST: Track and save best models based on different criteria
+        # Use single-community metrics for Phase 4
+        if ego_metrics is not None:
+            reward = ego_metrics.r_eval_mean
+            value_gap = ego_metrics.value_gap_mean
+            sanction_regret = ego_metrics.sanction_regret_mean
+            combined_score = value_gap + sanction_regret
+
+            self._check_and_save_best_models(reward, value_gap, sanction_regret, combined_score)
 
 
 # Helper function for creating callback list

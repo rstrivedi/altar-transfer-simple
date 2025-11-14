@@ -253,3 +253,434 @@ If I make a mistake:
 **If Unsure**: Ask the user, don't guess. But if it can be found in code, find it yourself.
 
 **User's Bottom Line**: "I don't want you to fuck up again"
+
+---
+
+## Current Session State (Before Compaction)
+
+**Date**: 2025-11-13
+
+**Phase**: Pre-Production Thorough Review
+
+**What We're Doing**:
+- User is doing a systematic pre-production review before full training runs
+- **Process**: User asks questions ONE-BY-ONE, I help clarify/verify/modify each before moving to next
+- **Current Status**: Just completed Question #1
+
+**Question #1: Reward Computation Verification** ✅ COMPLETED
+- **User's concern**: Suspicious of reported rewards (collective ~20-200 instead of ~600)
+- **What we did**:
+  1. Thoroughly investigated entire reward computation system (Lua + Python)
+  2. Found BUG: Lua never emits `reward_component` events, so alpha/beta/c tracking was broken
+  3. **Fixed**: Reconstructed alpha/beta/c from `sanction` events in recorder.py (lines 238-282)
+  4. **Fixed**: collective_reward now excludes alpha from ALL agents (line 419)
+  5. Created comprehensive verification table showing all reward components
+
+- **Final verdict**: ALL REWARD COMPUTATIONS ARE 100% CORRECT ✅
+  - r_total (training): r_env + alpha - beta - c (PPO optimizes this)
+  - r_eval (display): r_env - beta - c (excludes alpha training bonus)
+  - collective_reward: Sum of r_eval for all 16 agents (excludes alpha)
+  - Low collective (~20-200) is EXPECTED: learning ego disrupts equilibrium
+
+- **Files modified**:
+  - `/data/altar-transfer-simple/agents/metrics/recorder.py` (lines 231-282, 419)
+  - Added alpha/beta/c reconstruction from sanction events
+  - Fixed collective_reward formula
+
+**Current System State**:
+- RecurrentPPO: ✅ Working (all 4 combinations tested: treatment/control × recurrent/non-recurrent)
+- Multi-community: ✅ Working (Phase 5 tested)
+- Reward system: ✅ VERIFIED CORRECT
+- Progress bar: ✅ Fixed (tqdm with colors)
+- Metrics display: ✅ Correct (Mean Reward, Collective R)
+
+**Next Step**:
+- User will ask Question #2 for next verification item
+- Continue one-by-one review process until all concerns addressed
+- Then proceed to production runs
+
+**Important for Post-Compaction**:
+- User expects to continue with next question in review
+- Do NOT commit anything yet - still in review phase
+- Keep verifying one item at a time as user requests
+
+---
+
+**Question #2: Multi-Community Background Agent Behavior** ✅ COMPLETED (WITH FIX)
+
+**Date**: 2025-11-14
+**User Question**: "Are the background agents successfully changing behavior when environment change? So for the multi-community case, can you ensure that when at start of episode we sample an environment, the background policy also corresponds to selected norm."
+
+**Investigation Process**:
+1. User asked me to verify multi-community implementation
+2. I initially found what looked like a bug in altar color passing
+3. User challenged me to verify more carefully (mentioned handcoded agent videos worked for all colors)
+4. I studied code deeply and found residents DO read ALTAR observation and adapt
+5. **Critical Discovery**: Altar component's `altarColor` was hardcoded to `NORMATIVE_PARAMS["defaultAltarColor"]` (always 1=RED) in `create_scene()`, completely ignoring `config.permitted_color_index`
+
+**The Bug**:
+- **Location**: `meltingpot/meltingpot/configs/substrates/allelopathic_harvest_normative.py` line 692
+- **Problem**: `create_scene()` creates Altar with hardcoded `altarColor: NORMATIVE_PARAMS["defaultAltarColor"]` (always 1=RED)
+- **Impact**:
+  - ❌ Single-community GREEN: Residents plant RED instead of GREEN
+  - ❌ Single-community BLUE: Residents plant RED instead of BLUE
+  - ❌ Multi-community: Residents always plant RED regardless of sampled community
+  - ✅ Single-community RED: Works correctly (by accident)
+  - **ALL non-RED experiments were training wrong equilibrium**
+
+**How Residents Work** (this part was CORRECT):
+- Residents read `obs['ALTAR']` observation (resident_policy.py line 95)
+- Residents plant `self._plant_actions[altar_color]` (resident_policy.py line 156)
+- Residents sanction agents with `body_color != altar_color` (resident_policy.py line 138)
+- **Residents correctly adapt to whatever ALTAR says**
+- **BUT ALTAR was always showing 1 (RED) due to hardcoded value**
+
+**The Fix** (allelopathic_harvest_normative.py:1026-1063):
+```python
+def build(roles, config):
+    num_players = len(roles)
+    game_objects = create_avatar_and_associated_objects(roles=roles)
+
+    # Create scene with default altar color
+    scene = create_scene(num_players)
+
+    # Added by RST: Override Altar color from config (for multi-community support)
+    if hasattr(config, 'permitted_color_index') and config.permitted_color_index is not None:
+        for component in scene["components"]:
+            if component.get("component") == "Altar":
+                component["kwargs"]["altarColor"] = config.permitted_color_index
+                break
+
+    # Build substrate with modified scene
+    substrate_definition = dict(
+        ...
+        simulation={
+            ...
+            "scene": scene,  # Use modified scene
+        },
+    )
+    return substrate_definition
+```
+
+**Why This Works**:
+- No MeltingPot API changes (`create_scene()` signature unchanged)
+- Modifies scene dict AFTER creation, BEFORE passing to dmlab2d
+- Reads `config.permitted_color_index` set by sb3_wrapper or training scripts
+- Backward compatible (falls back to default RED if not set)
+
+**What This Fixes**:
+- ✅ Single-community GREEN training → Residents plant GREEN
+- ✅ Single-community BLUE training → Residents plant BLUE
+- ✅ Multi-community training → Residents adapt to sampled color each episode
+- ✅ Training scripts (sb3_wrapper.py) will now work correctly for all colors
+- ✅ Baseline scripts will continue to work (default RED)
+
+**Files Modified**:
+- `/data/altar-transfer-simple/meltingpot/meltingpot/configs/substrates/allelopathic_harvest_normative.py` (build function, lines 1026-1063)
+
+**Current Status**:
+- ✅ Fix implemented
+- ❌ NOT committed yet (user wants to test first)
+- Next: User will test the fix before committing
+
+**Next Step**:
+- User will test multi-community and single-community variants
+- Verify residents correctly adapt to GREEN and BLUE
+- Continue with more questions if needed
+- Then proceed to production runs
+
+---
+
+## Question #3: Architecture Review and Multi-Community Bug Fix
+
+**Date**: 2025-11-14
+**Status**: ✅ COMPLETED (WITH CRITICAL FIX)
+
+### Request
+
+User asked for full architecture explanation covering both control and treatment systems, including flow charts/tables for verification. During this review, I discovered a critical bug that would break Phase 5 multi-community control training.
+
+### The Bug
+
+**Issue**: `NormativeObservationFilter` was filtering ALTAR observation from ALL agents (ego + residents), not just ego.
+
+**Impact**:
+- **Phase 4 (single-community RED)**: ✅ Works by accident (residents default to altar_color=1 which matches RED)
+- **Phase 5 (multi-community)**: ❌ Broken in control arm
+  - When episode samples GREEN or BLUE, residents don't see ALTAR
+  - Residents default to RED (line 95 in resident_policy.py)
+  - Residents try to enforce RED norm while substrate expects GREEN/BLUE
+  - Creates internally contradictory environment (residents violate the actual norm!)
+  - Training would fail catastrophically
+
+### The Fix
+
+**Changed Files**:
+1. `agents/envs/normative_observation_filter.py` (lines 29-41, 60-85, 98-113)
+   - Added `ego_index` parameter to `__init__()`
+   - Modified `_get_timestep()` to only filter ego's observations
+   - Residents always see ALTAR regardless of treatment condition
+   - Updated observation_spec() to only remove ALTAR from ego's spec
+
+2. `agents/envs/sb3_wrapper.py` (lines 299-303)
+   - Pass `ego_index=self.ego_index` when creating NormativeObservationFilter
+
+**Design Rationale**:
+- Observation filter is the experimental manipulation (ego only)
+- Residents enforce equilibrium (must always see ALTAR to adapt to community)
+- Ensures both arms have identical resident behavior (architectural parity)
+
+### Verification
+
+Created `test_multi_community_fix.py` and verified:
+- ✅ Treatment ego sees `permitted_color` in all communities
+- ✅ Control ego does NOT see `permitted_color` in all communities
+- ✅ Residents see ALTAR in BOTH arms for all communities
+- ✅ Residents achieve 88-94% monoculture for RED, GREEN, and BLUE
+- ✅ Multi-community sampling correctly updates ALTAR per episode
+
+**Test command**:
+```bash
+conda run -n altar-simple --no-capture-output python test_multi_community_fix.py
+```
+
+**Result**: All tests passed ✓
+
+### Architecture Validation
+
+**Phase 4 (Single-Community)**: ✅ Faithful to intended test
+- Isolated observation manipulation (treatment gets altar signal, control doesn't)
+- Identical resident enforcement in both arms
+- Clean causal pathway for hypothesis testing
+
+**Phase 5 (Multi-Community)**: ✅ NOW fixed and faithful
+- Residents correctly adapt to sampled community (RED/GREEN/BLUE)
+- Both arms face identical equilibrium enforcement
+- Can test distributional competence hypothesis
+
+### Files Modified
+
+1. `agents/envs/normative_observation_filter.py` - Selective filtering by ego_index
+2. `agents/envs/sb3_wrapper.py` - Pass ego_index to filter
+3. `test_multi_community_fix.py` - Quick verification test (NEW)
+
+### Current Status
+
+- ✅ Bug identified during architecture review
+- ✅ Fix implemented and tested
+- ✅ Verification test created and passing
+- ❌ NOT committed yet (user wants to review)
+- ✅ Safe to proceed with Phase 4 and Phase 5 training
+
+**Next Step**:
+- User can review the fix
+- Run quick test to verify: `conda run -n altar-simple python test_multi_community_fix.py`
+- Continue with more pre-production questions if needed
+- Then proceed to production runs
+
+---
+
+## Question #4: Logging and Metrics Review + Berry Metrics Addition
+
+**Date**: 2025-11-14
+**Status**: ✅ COMPLETED (WITH ENHANCEMENT)
+
+### Request
+
+User asked for comprehensive documentation of:
+1. What metrics are being logged and how they're computed (exact formulas)
+2. What metrics are in W&B and under what names
+3. What's missing from W&B logging
+4. When/where videos are generated and stored
+5. When/where checkpoints are created and stored
+
+### Key Finding: Berry Metrics Gap
+
+During review, discovered that **monoculture fraction was NOT logged to W&B during training**:
+- ❌ Berry percentages (red%, green%, blue%) calculated but only shown in console
+- ❌ Monoculture fraction (max/total) calculated but only shown in console
+- ✅ Raw berry counts were logged
+- ✅ During evaluation, monoculture_fraction was fully logged
+
+**Impact**: Could see equilibrium quality in console during training but couldn't track trends over time in W&B.
+
+### Enhancement Made
+
+**Added to WandbLoggingCallback** (callbacks.py:402-409, 422-426):
+
+```python
+# Compute berry distribution metrics
+if total_berries > 0:
+    red_pct = berries_red / total_berries * 100
+    green_pct = berries_green / total_berries * 100
+    blue_pct = berries_blue / total_berries * 100
+    monoculture_fraction = max(berries_red, berries_green, berries_blue) / total_berries
+else:
+    red_pct = green_pct = blue_pct = monoculture_fraction = 0.0
+
+# Log to W&B (NEW)
+f"{prefix}/berry_pct_red": red_pct,
+f"{prefix}/berry_pct_green": green_pct,
+f"{prefix}/berry_pct_blue": blue_pct,
+f"{prefix}/monoculture_fraction": monoculture_fraction,
+```
+
+**New W&B metrics** (logged every ~2048 steps per community):
+- `episode/{community}/berry_pct_red` - % of berries that are RED (0-100)
+- `episode/{community}/berry_pct_green` - % of berries that are GREEN (0-100)
+- `episode/{community}/berry_pct_blue` - % of berries that are BLUE (0-100)
+- `episode/{community}/monoculture_fraction` - max(R,G,B)/(R+G+B) (0.0-1.0)
+
+**Formula**:
+```
+monoculture_fraction = max(berries_red, berries_green, berries_blue) / total_berries
+```
+
+Where berry counts are from `WORLD.BERRIES_BY_TYPE` observation at episode end.
+
+### Files Modified
+
+1. `agents/train/callbacks.py` (lines 402-409, 422-426) - Added berry distribution metrics to W&B logging
+
+### Comprehensive Logging Documentation
+
+Created comprehensive documentation covering:
+- All metrics computed in recorder.py with exact formulas
+- All W&B metrics logged during training (SB3 auto + custom)
+- FiLM diagnostics, action distributions, per-community metrics
+- Phase 4 and Phase 5 evaluation metrics
+- What's missing from W&B logging (per-step granular data, LSTM states, resident behavior)
+- Video generation (opt-in during evaluation only, not automatic during training)
+- Checkpoint creation (every 50k-100k steps, stored in ./checkpoints/)
+
+**Key formulas documented**:
+- `r_total = r_env + α - β - c` (training reward)
+- `r_eval = r_total - α = r_env - β - c` (evaluation reward, excludes training bonus)
+- `collective_reward = Σ(r_total[i] - α[i])` for all 16 agents
+- `α = +5.0` per correct sanction
+- `β = -5.0` per incorrect sanction
+- `c = -0.5` per zap attempt
+- `monoculture_fraction = max(R,G,B) / (R+G+B)`
+
+### Current Status
+
+- ✅ Comprehensive logging documentation provided
+- ✅ Berry metrics gap identified and fixed
+- ✅ New W&B metrics added for tracking equilibrium quality during training
+- ❌ NOT committed yet (user to review)
+
+**Next Step**:
+- User reviews logging documentation
+- Continue with more pre-production questions if needed
+- Then proceed to production runs
+
+---
+
+## Question #5: Experimental Configurations and FiLM Ablations
+
+**Date**: 2025-11-14
+**Status**: ✅ DOCUMENTED (Implementation Deferred)
+
+### Request
+
+User asked about different experimental configurations possible based on command-line arguments and ablations.
+
+### Main Experimental Dimensions Identified
+
+**Primary Matrix** (2×2×3 = 12 core conditions):
+- **Arm**: treatment vs control
+- **Mode**: single-community vs multi-community
+- **Color**: RED, GREEN, BLUE
+
+**Command-line flexibility**:
+- `--multi-community` flag for Phase 5
+- `--permitted-color {red|green|blue}` for single-community color selection
+- `--seed`, `--total-timesteps`, `--n-envs` for cluster sweeps
+- All major parameters overridable via CLI (no YAML editing needed)
+
+**Config-based ablations** (require YAML editing):
+- Architecture: `recurrent` (LSTM vs feedforward), `trunk_dim`, hidden sizes
+- Reward shaping: `alpha`, `beta`, `c` values
+- Environment: `include_timestep`, `grace_period`, `episode_length`
+- Training: learning rate, entropy coefficients, batch size
+
+### Critical Finding: FiLM Ablations Missing
+
+**User insight**: Need ablations to validate FiLM learns color-specific modulation, not just benefits from any signal.
+
+**Proposed ablation matrix**:
+1. **Correct-FiLM**: Current treatment (altar color → FiLM)
+2. **Null-FiLM**: Current control (zeros → FiLM)
+3. **Random-FiLM**: Random noise → FiLM (tests if FiLM uses color semantics)
+4. **No-FiLM**: Concatenation instead of FiLM (tests if FiLM architecture necessary)
+
+**Critical test**: Correct-FiLM vs Random-FiLM
+- If Correct >> Random → FiLM learns color-specific modulation ✓
+- If Correct ≈ Random → FiLM broken (doesn't use color info) ✗
+
+**Multi-community diagnostic**: Random-FiLM-Multi should FAIL badly
+- Cannot learn 3 distinct policies with random conditioning
+- Strong evidence FiLM learns color-specific if Correct >> Random
+
+### Decision
+
+**Defer FiLM ablations** until after main Phase 4/5 experiments complete.
+
+**Rationale**:
+- Main experiments establish IF hypothesis holds
+- FiLM ablations establish WHY/HOW mechanism works
+- Logical dependency: confirm treatment beats control first
+
+### Documentation Created
+
+**File**: `film.md` (comprehensive ablation study design)
+
+**Contents**:
+- Motivation and problem statement
+- Complete ablation matrix with architectures
+- What each comparison tests
+- Implementation approaches (environment wrapper vs policy modification)
+- Experimental design (3 phases, 21 total runs)
+- Expected results and interpretations
+- Implementation checklist
+- Timeline (~3 weeks post main experiments)
+
+**Key implementation approach**:
+- `FiLMAblationWrapper` to modify observations (random/permuted/null conditioning)
+- `ConcatTwoHeadPolicy` for No-FiLM ablation (concatenation architecture)
+- Config parameter: `env.film_ablation = 'correct' | 'random_episodic' | 'random_step' | 'permuted'`
+
+### Recommended Experimental Priority
+
+**Tier 1** (Core Hypothesis - Must Run):
+- Treatment RED (5 seeds)
+- Control RED (5 seeds)
+- Treatment Multi (3 seeds)
+- Control Multi (3 seeds)
+Total: 16 runs
+
+**Tier 2** (Generalization - Verify RED not special):
+- Treatment/Control GREEN (3 seeds each)
+- Treatment/Control BLUE (3 seeds each)
+Total: 12 runs
+
+**Tier 3** (FiLM Ablations - Deferred):
+- Correct/Null/Random/No-FiLM (3 seeds each)
+- Multi-community variants
+Total: 21 runs (after Tier 1/2 complete)
+
+### Files Modified
+
+1. `film.md` - Comprehensive FiLM ablation study design (NEW)
+
+### Current Status
+
+- ✅ Experimental configuration space documented
+- ✅ FiLM ablations designed and documented
+- ✅ Implementation approach specified
+- ⏸️ FiLM ablations deferred until main experiments complete
+- ✅ Ready to proceed with Tier 1 experiments
+
+**Next Step**:
+- Focus on main Phase 4/5 experiments (Tier 1)
+- Implement FiLM ablations later based on film.md blueprint

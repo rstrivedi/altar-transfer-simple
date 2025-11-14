@@ -216,3 +216,9 @@ __marimo__/
 # New files and folders
 /meltingpot/meltingpot/assets/
 /meltingpot/assets/
+
+# Training outputs and logs
+logs/
+outputs/
+/wandb/
+checkpoints/

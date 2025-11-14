@@ -89,6 +89,9 @@ class ResidentWrapper:
     # Store last timestep for accessing observations
     self._last_timestep = None
 
+    # Edited by RST: Store last actions for baseline tracking
+    self._last_actions = None
+
   def reset(self, *args, **kwargs) -> dm_env.TimeStep:
     """Reset environment and resident policies.
 
@@ -165,6 +168,9 @@ class ResidentWrapper:
     # Store timestep for next step() call
     self._last_timestep = timestep
 
+    # Edited by RST: Store actions for baseline tracking
+    self._last_actions = actions
+
     return timestep
 
   def _extract_agent_timestep(self, timestep: dm_env.TimeStep, agent_id: int) -> dm_env.TimeStep:
@@ -204,6 +210,23 @@ class ResidentWrapper:
   def action_spec(self):
     """Forward to wrapped environment."""
     return self._env.action_spec()
+
+  def get_last_action(self, agent_id: int) -> Optional[int]:
+    """Get the last action taken by a specific agent.
+
+    Added by RST: For baseline tracking where we need to know resident actions.
+
+    Args:
+      agent_id: Agent index (0-indexed).
+
+    Returns:
+      Last action taken by agent, or None if no step has occurred yet.
+    """
+    if self._last_actions is None:
+      return None
+    if agent_id < 0 or agent_id >= len(self._last_actions):
+      return None
+    return self._last_actions[agent_id]
 
   def close(self):
     """Close all policies and wrapped environment."""

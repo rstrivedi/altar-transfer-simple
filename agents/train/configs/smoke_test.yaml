@@ -4,12 +4,12 @@
 # Environment configuration
 env:
   permitted_color_index: 1
-  startup_grey_grace: 25
+  startup_grey_grace: 50  # Edited by RST: Updated to match substrate (was 25)
   episode_timesteps: 2000
   altar_coords: [5, 15]
-  alpha: 0.5
-  beta: 0.5
-  c: 0.2
+  alpha: 5.0  # Edited by RST: Train-time bonus for correct zaps (was 0.5)
+  beta: 5.0   # Edited by RST: Mis-zap penalty magnitude (was 0.5)
+  c: 0.5      # Edited by RST: Zap effort cost magnitude (was 0.2)
   immunity_cooldown: 200
 
 # Training hyperparameters (REDUCED for smoke test)
@@ -37,7 +37,7 @@ policy:
   sanction_hidden_dim: 128
   ent_coef_game: 0.01
   ent_coef_sanction: 0.02
-  recurrent: false
+  recurrent: true  # Edited by RST: Enable LSTM for partial observability (was false)
   lstm_hidden_size: 256
 
 # VecNormalize configuration

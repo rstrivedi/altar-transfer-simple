@@ -1,0 +1,70 @@
+# Added by RST: Small-scale test configuration for Treatment arm (3 seeds)
+# For testing training pipeline with limited resources
+
+# Environment configuration
+env:
+  permitted_color_index: 1  # 1=RED
+  startup_grey_grace: 50
+  episode_timesteps: 2000
+  altar_coords: [5, 15]
+  alpha: 5.0
+  beta: 5.0
+  c: 0.5
+  immunity_cooldown: 200
+
+# Training hyperparameters (SMALL SCALE)
+training:
+  total_timesteps: 300000  # 300k steps (~150 episodes per env, ~2-3 hrs)
+  n_envs: 8  # Moderate parallelism
+  seed: 42  # Will run 3 times with seeds: 42, 43, 44
+  learning_rate: 0.0003
+  n_steps: 256
+  batch_size: 2048
+  n_epochs: 10
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: null
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  use_sde: false
+  sde_sample_freq: -1
+
+# Policy architecture
+policy:
+  trunk_dim: 256
+  sanction_hidden_dim: 128
+  ent_coef_game: 0.01
+  ent_coef_sanction: 0.02
+  recurrent: true  # LSTM enabled for partial observability
+  lstm_hidden_size: 256
+
+# VecNormalize configuration
+vec_normalize:
+  norm_obs: false
+  norm_reward: true
+  clip_obs: 10.0
+  clip_reward: 10.0
+  gamma: 0.995
+
+# Logging configuration
+logging:
+  wandb_project: altar-transfer
+  wandb_entity: null  # Set to your W&B username/team, or use WANDB_ENTITY env var
+  wandb_run_name: null  # Will be auto-generated with seed
+  wandb_tags: ['test', 'phase4', '3seeds']  # Added by RST: Tags for organizing runs
+  tensorboard_log: ./logs/tensorboard
+  log_interval: 10  # Log FiLM diagnostics every 10 rollouts
+
+# Checkpointing configuration
+checkpointing:
+  save_freq: 50000  # Save every 50k steps
+  checkpoint_dir: ./checkpoints/test_treatment
+  save_vec_normalize: true
+
+# Evaluation configuration
+evaluation:
+  eval_freq: 100000  # Evaluate at 100k, 200k, 300k
+  n_eval_episodes: 10  # Smaller for faster eval
+  eval_seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]

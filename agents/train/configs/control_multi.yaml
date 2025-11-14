@@ -6,12 +6,12 @@ env:
   # Note: permitted_color_index is sampled independently per episode in multi-community mode
   # This default value is not used during training, but kept for compatibility
   permitted_color_index: 1  # Placeholder (sampled at runtime: 1=RED, 2=GREEN, 3=BLUE)
-  startup_grey_grace: 25
+  startup_grey_grace: 50  # Edited by RST: Updated to match substrate (was 25)
   episode_timesteps: 2000
   altar_coords: [5, 15]  # Not used in control (no altar rendering)
-  alpha: 0.5  # Train-time bonus for correct zaps (same as treatment)
-  beta: 0.5   # Mis-zap penalty (same as treatment)
-  c: 0.2      # Zap effort cost (same as treatment)
+  alpha: 5.0  # Edited by RST: Train-time bonus for correct zaps (was 0.5, same as treatment)
+  beta: 5.0   # Edited by RST: Mis-zap penalty magnitude (was 0.5, same as treatment)
+  c: 0.5      # Edited by RST: Zap effort cost magnitude (was 0.2, same as treatment)
   immunity_cooldown: 200
 
 # Training hyperparameters (PPO)
@@ -41,7 +41,7 @@ policy:
   sanction_hidden_dim: 128
   ent_coef_game: 0.01      # Same as treatment
   ent_coef_sanction: 0.02  # Same as treatment
-  recurrent: false         # Set to true for LSTM variant
+  recurrent: true          # Edited by RST: Enable LSTM for partial observability (was false, same as treatment)
   lstm_hidden_size: 256
 
 # VecNormalize configuration

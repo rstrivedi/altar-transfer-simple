@@ -3,8 +3,8 @@
 
 This script loads a trained PPO checkpoint and runs the Phase 3 evaluation protocol:
 1. Baseline: Resident-in-ego-slot (all 16 agents are residents)
-2. Treatment: Ego + residents with PERMITTED_COLOR observation
-3. Control: Ego + residents without PERMITTED_COLOR observation
+2. Treatment: Ego + residents with permitted_color observation (from ALTAR)
+3. Control: Ego + residents without permitted_color observation
 
 Results are logged to W&B and saved locally.
 
@@ -77,7 +77,9 @@ def load_policy_from_checkpoint(
         # Extract fields
         rgb = obs.get('RGB')  # (88, 88, 3) uint8
         ready_to_shoot = obs.get('READY_TO_SHOOT', 0.0)  # scalar
-        permitted_color = obs.get('PERMITTED_COLOR')  # (3,) or None
+
+        # Edited by RST: Substrate provides ALTAR (scalar), convert to one-hot permitted_color
+        altar = obs.get('ALTAR')  # Scalar: 1, 2, or 3 (Lua 1-indexed), or None
 
         # Build observation dict for policy
         policy_obs = {
@@ -86,8 +88,12 @@ def load_policy_from_checkpoint(
             'timestep': np.array([[0.0]], dtype=np.float32),  # TODO: track timestep in eval
         }
 
-        if permitted_color is not None:
-            policy_obs['permitted_color'] = np.expand_dims(permitted_color.astype(np.float32), axis=0)  # (1, 3)
+        # Convert ALTAR to one-hot permitted_color if present (treatment arm)
+        if altar is not None:
+            altar_idx = int(altar) - 1  # Convert to Python 0-indexing
+            permitted_color_onehot = np.zeros(3, dtype=np.float32)
+            permitted_color_onehot[altar_idx] = 1.0  # [1,0,0]=RED, [0,1,0]=GREEN, [0,0,1]=BLUE
+            policy_obs['permitted_color'] = np.expand_dims(permitted_color_onehot, axis=0)  # (1, 3)
 
         # Predict action (deterministic for evaluation)
         action, _states = model.predict(policy_obs, deterministic=True)

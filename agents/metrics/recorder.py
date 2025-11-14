@@ -111,8 +111,31 @@ class MetricsRecorder:
     beta_step = np.zeros(self._num_players, dtype=np.float64)
     c_step = np.zeros(self._num_players, dtype=np.float64)
 
+    # # Debug: Print all event types and violation status at t=100, 200, 300
+    # if t in [100, 200, 300]:
+    #   event_names = set([event.get('name', 'UNKNOWN') for event in events])
+    #   print(f"DEBUG t={t}: Event types: {event_names}")
+    #   print(f"DEBUG t={t}: Ego body color: {self._ego_body_color}, Permitted: {self._permitted_color_index}")
+    #   print(f"DEBUG t={t}: Ego violating: {self._ego_body_color != self._permitted_color_index and self._ego_body_color != 0}")
+    #   print(f"DEBUG t={t}: In grace period: {t < self._startup_grey_grace}")
+
+    # # Debug: Track zap actions
+    # if ego_action == 7:  # FIRE_ZAP
+    #   print(f"DEBUG: Ego fired ZAP at t={t}, ego_color={self._ego_body_color}")
+
+    # # Debug: Count sanction events at t=100, 200, 300
+    # if t in [100, 200, 300]:
+    #   sanction_count = sum(1 for e in events if e.get('name') == 'sanction')
+    #   print(f"DEBUG t={t}: Sanction events this step: {sanction_count}")
+
     for event in events:
       event_name = event.get('name', '')
+
+      # # Debug sanction events (print first 3 sanctions ever to verify parsing)
+      # if event_name == 'sanction':
+      #   total_sanctions_so_far = sum(len(sm.sanctions) for sm in self._step_metrics)
+      #   if total_sanctions_so_far < 3:
+      #     print(f"DEBUG: Sanction event #{total_sanctions_so_far} at t={t}: {event}")
 
       # === reward_component events ===
       if event_name == 'reward_component':
@@ -140,10 +163,11 @@ class MetricsRecorder:
         zapper_id_lua = event.get('zapper_id')  # 1-indexed
         zappee_id_lua = event.get('zappee_id')  # 1-indexed
         zappee_color = event.get('zappee_color', 0)
-        was_violation = event.get('was_violation', False)
-        applied_minus10 = event.get('applied_minus10', False)
-        immune = event.get('immune', False)
-        tie_break = event.get('tie_break', False)
+        # Lua sends booleans as 1/0, convert to Python bool
+        was_violation = bool(event.get('was_violation', 0))
+        applied_minus10 = bool(event.get('applied_minus10', 0))
+        immune = bool(event.get('immune', 0))
+        tie_break = bool(event.get('tie_break', 0))
 
         if zapper_id_lua is None or zappee_id_lua is None:
           continue
@@ -204,10 +228,67 @@ class MetricsRecorder:
         if player_idx == self._ego_index:
           self._ego_body_color = self_body_color
 
+    # === Reconstruct alpha/beta/c from sanction events ===
+    # Added by RST: Lua doesn't emit reward_component events, so we reconstruct
+    # alpha/beta/c from sanction events. We know:
+    # - If applied_minus10 == True: rewards were applied
+    # - Zapper gets: c=-0.5, alpha=+5.0 (if violation) OR beta=-5.0 (if not)
+    # - Zappee gets: -10.0 penalty (already in timestep.reward)
+
+    # Handle ego agent sanctions (keep separate for clarity)
+    for sanction in sanctions:
+      # Only count sanctions that actually applied rewards
+      if not sanction.applied_minus10:
+        continue  # Fizzled (grace period/immune/tie-break), no rewards applied
+
+      # Check if ego was the zapper (convert to int for comparison)
+      if int(sanction.zapper_id) == self._ego_index:
+        # Ego paid zap cost
+        c_step[self._ego_index] += -0.5
+        self._c_sum[self._ego_index] += -0.5
+
+        # Ego got alpha (correct sanction) or beta (incorrect sanction)
+        if sanction.was_violation:
+          # Correct sanction: alpha bonus
+          alpha_step[self._ego_index] += 5.0
+          self._alpha_sum[self._ego_index] += 5.0
+        else:
+          # Incorrect sanction: beta penalty
+          beta_step[self._ego_index] += -5.0
+          self._beta_sum[self._ego_index] += -5.0
+
+    # Handle other agents' sanctions (for collective reward computation)
+    for sanction in sanctions:
+      # Only count sanctions that actually applied rewards
+      if not sanction.applied_minus10:
+        continue
+
+      zapper_idx = int(sanction.zapper_id)  # Convert to int for numpy indexing
+
+      # Skip ego (already handled above)
+      if zapper_idx == self._ego_index:
+        continue
+
+      # Other agent paid zap cost
+      c_step[zapper_idx] += -0.5
+      self._c_sum[zapper_idx] += -0.5
+
+      # Other agent got alpha or beta
+      if sanction.was_violation:
+        alpha_step[zapper_idx] += 5.0
+        self._alpha_sum[zapper_idx] += 5.0
+      else:
+        beta_step[zapper_idx] += -5.0
+        self._beta_sum[zapper_idx] += -5.0
+
     # === Get timestep rewards ===
-    # timestep.reward is r_total = r_env + alpha - beta - c
+    # timestep.reward is r_total = r_env + alpha - beta - c (array for all agents)
+    # Added by RST: Track ALL agents' rewards for collective reward calculation
+    for player_idx in range(self._num_players):
+      self._r_total_sum[player_idx] += timestep.reward[player_idx]
+
+    # Get ego's reward for this step
     r_total_step = timestep.reward[self._ego_index]
-    self._r_total_sum[self._ego_index] += r_total_step
 
     # Compute r_env_step = r_total_step - alpha_step + beta_step + c_step
     # Because: r_total = r_env + alpha - beta - c
@@ -283,3 +364,73 @@ class MetricsRecorder:
       Ego body color (from most recent resident_info event).
     """
     return self._ego_body_color
+
+  def get_episode_summary(self) -> Dict[str, float]:
+    """Get episode summary metrics for logging.
+
+    Returns:
+      Dict with episode-level metrics.
+    """
+    # Count berry plants/eats and sanctions from step metrics
+    berries_planted_red = 0
+    berries_planted_green = 0
+    berries_planted_blue = 0
+    berries_consumed_red = 0
+    berries_consumed_green = 0
+    berries_consumed_blue = 0
+    times_sanctioned = 0
+    times_sanctioned_others = 0
+
+    for step in self._step_metrics:
+      # Berry plants by ego (PlantEvent has player_index, target_berry)
+      for plant in step.plants:
+        if plant.player_index == self._ego_index:
+          color = plant.target_berry
+          if color == 1:
+            berries_planted_red += 1
+          elif color == 2:
+            berries_planted_green += 1
+          elif color == 3:
+            berries_planted_blue += 1
+
+      # Berry consumption by ego (EatEvent has player_index, berry_color)
+      for eat in step.eats:
+        if eat.player_index == self._ego_index:
+          color = eat.berry_color
+          if color == 1:
+            berries_consumed_red += 1
+          elif color == 2:
+            berries_consumed_green += 1
+          elif color == 3:
+            berries_consumed_blue += 1
+
+      # Sanctions (SanctionEvent has zapper_id, zappee_id)
+      for sanction in step.sanctions:
+        if sanction.zappee_id == self._ego_index:
+          times_sanctioned += 1
+        if sanction.zapper_id == self._ego_index:
+          times_sanctioned_others += 1
+
+    # Episode totals
+    r_total = self._r_total_sum[self._ego_index]
+    r_eval = self.get_r_eval()
+    # Collective reward = sum of natural rewards (r_total - alpha) for ALL agents
+    # Alpha is a training bonus, not part of actual social welfare
+    collective_reward = (self._r_total_sum - self._alpha_sum).sum()
+    alpha_total = self._alpha_sum[self._ego_index]
+
+    return {
+      'r': float(r_total),
+      'l': len(self._step_metrics),
+      'r_eval': float(r_eval),
+      'collective_reward': float(collective_reward),
+      'alpha': float(alpha_total),  # Added by RST: For displaying r - alpha
+      'berries_planted_red': berries_planted_red,
+      'berries_planted_green': berries_planted_green,
+      'berries_planted_blue': berries_planted_blue,
+      'berries_consumed_red': berries_consumed_red,
+      'berries_consumed_green': berries_consumed_green,
+      'berries_consumed_blue': berries_consumed_blue,
+      'times_sanctioned': times_sanctioned,
+      'times_sanctioned_others': times_sanctioned_others,
+    }
